@@ -14,6 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssm v1.79.3
 	github.com/awslabs/aws-lambda-go-api-proxy v0.16.2
 	github.com/go-webauthn/webauthn v0.18.2
+	golang.org/x/crypto v0.57.0
 )
 
 require (
@@ -39,6 +40,5 @@ require (
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/crypto v0.57.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 )

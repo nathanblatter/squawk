@@ -20,6 +20,8 @@ import (
 	"github.com/nathanblatter/squawk/internal/signer"
 	"github.com/nathanblatter/squawk/internal/store"
 	"github.com/nathanblatter/squawk/internal/users"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 const adminToken = "test-admin-token"
@@ -1450,5 +1452,110 @@ func TestOrgInviteHTTP(t *testing.T) {
 	}
 	if code, body := do(t, "GET", inviteURL, svcTok, "", ""); code != 200 || len(body["invites"].([]any)) != 0 {
 		t.Fatalf("invite must be consumed: %d %v", code, body)
+	}
+}
+
+func TestPasswordHTTP(t *testing.T) {
+	ts, _ := newServerWithStore(t, "https://auth.test")
+	srv := lastServer
+	srv.Users.Cost = bcrypt.MinCost
+	admin := "Bearer " + adminToken
+
+	_, svc := do(t, "POST", ts.URL+"/admin/services", admin, "application/json", `{"name":"Therapist","slug":"therapist"}`)
+	id := svc["id"].(string)
+	do(t, "PUT", ts.URL+"/admin/services/"+id+"/permissions", admin, "application/json", `{"scopes":["read","write"],"roles":{"participant":["read"],"researcher":["read","write"]}}`)
+	do(t, "POST", ts.URL+"/admin/services/"+id+"/resources", admin, "application/json", `{"resource":"https://therapist.test/api"}`)
+	do(t, "PUT", ts.URL+"/admin/services/"+id+"/login", admin, "application/json", `{"login_url":"https://therapist.test/login","rp_id":"therapist.test","origins":["https://therapist.test"],"default_roles":["participant"],"open_signup":false}`)
+	_, cred := do(t, "POST", ts.URL+"/admin/services/"+id+"/credentials", admin, "", "")
+	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {id}, "client_secret": {cred["credential"].(string)}}
+	_, tk := do(t, "POST", ts.URL+"/v1/token", "", "application/x-www-form-urlencoded", form.Encode())
+	svcTok := "Bearer " + tk["access_token"].(string)
+
+	// Import: a bcrypt hash straight from the old database, explicit role, no email.
+	hash, _ := bcrypt.GenerateFromPassword([]byte("hunter22"), bcrypt.MinCost)
+	body, _ := json.Marshal(map[string]any{"method": "password", "username": "p0042", "password_hash": string(hash), "roles": []string{"researcher"}})
+	code, user := do(t, "POST", ts.URL+"/admin/services/"+id+"/users", admin, "application/json", string(body))
+	if code != 201 || user["method"] != "password" || user["username"] != "p0042" || user["email"] != "" || user["email_verified"] != true || user["roles"].([]any)[0] != "researcher" {
+		t.Fatalf("import: %d %v", code, user)
+	}
+	if _, has := user["password_hash"]; has {
+		t.Fatal("the hash must never be returned")
+	}
+	userID := user["id"].(string)
+	if code, body := do(t, "POST", ts.URL+"/admin/services/"+id+"/users", admin, "application/json", `{"method":"password","username":"p0043","password":"short"}`); code != 400 || body["error"] != "invalid_request" {
+		t.Fatalf("weak password: %d %v", code, body)
+	}
+	if code, body := do(t, "POST", ts.URL+"/admin/services/"+id+"/users", admin, "application/json", `{"method":"password","username":"P0042","password":"correct horse"}`); code != 409 || body["error"] != "identity_taken" {
+		t.Fatalf("duplicate username: %d %v", code, body)
+	}
+
+	// Login through the parked authorization.
+	_, reg := do(t, "POST", ts.URL+"/oauth/register", "", "application/json", `{"client_name":"Therapist web","redirect_uris":["https://therapist.test/cb"],"token_endpoint_auth_method":"none"}`)
+	clientID := reg["client_id"].(string)
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	verifier := strings.Repeat("v", 43)
+	sum := sha256.Sum256([]byte(verifier))
+	authorize := func() string {
+		q := url.Values{"client_id": {clientID}, "redirect_uri": {"https://therapist.test/cb"}, "response_type": {"code"}, "state": {"s1"},
+			"resource": {"https://therapist.test/api"}, "scope": {"read write"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(sum[:])}, "code_challenge_method": {"S256"}}
+		resp, _ := noRedirect.Get(ts.URL + "/oauth/authorize?" + q.Encode())
+		resp.Body.Close()
+		loc, _ := url.Parse(resp.Header.Get("Location"))
+		return loc.Query().Get("login_challenge")
+	}
+	lc := authorize()
+	if code, _ := do(t, "POST", ts.URL+"/v1/login/password", "", "application/json", `{}`); code != 401 {
+		t.Fatalf("without service token: %d", code)
+	}
+	if code, body := do(t, "POST", ts.URL+"/v1/login/password", svcTok, "application/json", `{"login_challenge":"nope","username":"p0042","password":"hunter22"}`); code != 404 {
+		t.Fatalf("unknown challenge: %d %v", code, body)
+	}
+	if code, body := do(t, "POST", ts.URL+"/v1/login/password", svcTok, "application/json", `{"login_challenge":"`+lc+`","username":"p0042","password":"hunter23"}`); code != 401 || body["error"] != "password_rejected" {
+		t.Fatalf("wrong password: %d %v", code, body)
+	}
+	if code, body := do(t, "POST", ts.URL+"/v1/login/password", svcTok, "application/json", `{"login_challenge":"`+lc+`","username":"ghost","password":"hunter22"}`); code != 401 || body["error"] != "password_rejected" {
+		t.Fatalf("unknown user must look the same: %d %v", code, body)
+	}
+	code, fin := do(t, "POST", ts.URL+"/v1/login/password", svcTok, "application/json", `{"login_challenge":"`+lc+`","username":"P0042","password":"hunter22"}`)
+	if code != 200 || fin["redirect_to"] == nil {
+		t.Fatalf("login: %d %v", code, fin)
+	}
+	cb, _ := url.Parse(fin["redirect_to"].(string))
+	form = url.Values{"grant_type": {"authorization_code"}, "client_id": {clientID}, "code": {cb.Query().Get("code")}, "code_verifier": {verifier}, "redirect_uri": {"https://therapist.test/cb"}}
+	code, tok := do(t, "POST", ts.URL+"/oauth/token", "", "application/x-www-form-urlencoded", form.Encode())
+	if code != 200 {
+		t.Fatalf("token: %d %v", code, tok)
+	}
+	claims, err := srv.Core.VerifyToken(tok["access_token"].(string), id)
+	if err != nil || claims.Subject != "usr:"+userID || claims.PreferredUsername != "p0042" || claims.Email != "" || claims.Scope != "read write" {
+		t.Fatalf("claims: %+v %v", claims, err)
+	}
+	// The challenge was consumed.
+	if code, _ := do(t, "POST", ts.URL+"/v1/login/password", svcTok, "application/json", `{"login_challenge":"`+lc+`","username":"p0042","password":"hunter22"}`); code != 404 {
+		t.Fatalf("replayed challenge: %d", code)
+	}
+
+	// Ten wrong passwords lock the username, whatever the IP.
+	lc = authorize()
+	for i := 0; i < 10; i++ {
+		do(t, "POST", ts.URL+"/v1/login/password", svcTok, "application/json", `{"login_challenge":"`+lc+`","username":"p0042","password":"wrong"}`)
+	}
+	if code, body := do(t, "POST", ts.URL+"/v1/login/password", svcTok, "application/json", `{"login_challenge":"`+lc+`","username":"p0042","password":"hunter22"}`); code != 429 {
+		t.Fatalf("locked username: %d %v", code, body)
+	}
+
+	// The product resets a password under its service token; the admin too.
+	if code, body := do(t, "POST", ts.URL+"/v1/users/"+userID+"/password", svcTok, "application/json", `{"password":"brand new pass"}`); code != 200 || body["method"] != "password" {
+		t.Fatalf("set password: %d %v", code, body)
+	}
+	if code, body := do(t, "POST", ts.URL+"/admin/services/"+id+"/users/"+userID+"/password", admin, "application/json", `{"password":"x"}`); code != 400 {
+		t.Fatalf("admin weak password: %d %v", code, body)
+	}
+	if code, body := do(t, "POST", ts.URL+"/v1/users/usr_ghost/password", svcTok, "application/json", `{"password":"brand new pass"}`); code != 404 {
+		t.Fatalf("unknown user: %d %v", code, body)
+	}
+	// A password account may start passkey registration (conversion path).
+	if code, body := do(t, "POST", ts.URL+"/v1/users/"+userID+"/passkeys/begin", svcTok, "", ""); code != 200 || body["options"] == nil {
+		t.Fatalf("passkey begin for a password account: %d %v", code, body)
 	}
 }

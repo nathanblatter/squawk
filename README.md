@@ -159,8 +159,9 @@ curl -s $AUTH/v1/me -H "Authorization: Bearer <access_token>"
 ## End users
 
 A service with a login URL becomes a user pool: its own app signs people in with passkeys,
-Google or an emailed 6-digit code through `/v1/users*` and `/v1/login/*` (service token), and
-gets ordinary OAuth tokens for them. `open_signup` decides whether anyone may create an
+Google, an emailed 6-digit code or, for accounts migrated from an older system, a username
+and password (bcrypt hashes import as they are; a passkey later replaces the password) through
+`/v1/users*` and `/v1/login/*` (service token), and gets ordinary OAuth tokens for them. `open_signup` decides whether anyone may create an
 account (the games) or only the owner may (the personal site). App-created passkey accounts
 verify their email with a code before they can sign in. The owner needs no account in any
 pool: owner passkeys bind to the parent domain, so every login page can offer "Sign in as

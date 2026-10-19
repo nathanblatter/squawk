@@ -18,7 +18,8 @@ console for minting and managing service credentials.
 queue feeding a worker Lambda, CloudWatch, all in one CloudFormation (SAM) template.
 Not the Mac mini: auth for apps that live elsewhere must survive a home outage.
 
-**DECIDED:** end-user login methods are passkeys, Sign in with Google, Sign in with Apple.
+**DECIDED:** end-user login methods are passkeys, Sign in with Google, Sign in with Apple
+(later), emailed codes, and, for migrated accounts only, username + password (2026-10-19).
 No account linking: an account created with Google signs in only with Google.
 
 **DECIDED:** customers of each product are separate pools. Nathan himself has one owner
@@ -187,6 +188,23 @@ Google asserts the address, an email code proves it, the owner vouches for provi
 accounts. Tokens carry `email_verified`. Codes live in `CHALLENGE#` rows as a salted SHA-256
 (challenge id + code), 10 minutes, 5 attempts (a wrong guess re-puts the row with the same
 expiry), single use. Sends are rate-limited per address and per IP.
+
+**DECIDED (Nathan, 2026-10-19): a fourth method, `password`, for migrating a product's existing
+users (auth-service-33, AI Therapist first).** Squawk was built to retire passwords, but
+AI Therapist's 60-odd accounts have bcrypt hashes and pseudonymous usernames with no email,
+and Nathan chose to move them as they are rather than force a reset. Shape: identity
+`username:<lower-cased name>`, display `username` kept; `email` optional (vouched by the owner
+when given); born `email_verified` so the normal login gate applies; no codes or alerts
+without an address. Owner-only creation (`POST /admin/services/{id}/users`, method
+`password`, plaintext or an existing bcrypt hash), so a pool never grows password accounts on
+its own. Login: `POST /v1/login/password` on the parked authorization; unknown name and wrong
+password are the same `401`, timed alike (a dummy bcrypt compare for the unknown case); 10
+failures lock the username for 15 minutes from any IP, on top of the per-IP limit. Tokens
+carry `preferred_username`. **Conversion, one method for life over time:** a password account
+may register a passkey, and the first registration flips the method to `passkey` and deletes
+the hash; setting a new password (owner or product) flips it back and removes the passkeys.
+Rejected: keeping password + passkey side by side (weaker, and against the one-method rule)
+and a username-less import (the usernames are the identities the study knows people by).
 
 **New-sign-in alerts (auth-service-29).** Every successful user sign-in stamps
 `last_login_at` and touches a `SEEN#<ip>` row under the user (DynamoDB TTL, 90 days). A

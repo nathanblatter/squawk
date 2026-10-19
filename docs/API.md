@@ -111,6 +111,7 @@ Header `{"alg":"ES256","typ":"at+jwt","kid":"<key id>"}`. Claims:
 | `scope` | `service` | requested scopes, space-separated |
 | `client_id` | — | `nbc_…` |
 | `email`, `email_verified` | — | user tokens only |
+| `preferred_username` | user tokens of password (or converted) accounts: the username; such accounts may have no `email` |
 | `org`, `org_role` | — | only when an org context was requested: org id and `admin\|member` |
 | `iat`, `exp`, `jti` | yes | yes |
 
@@ -151,9 +152,20 @@ The Go client does all of this: `client.NewVerifier(issuer, serviceID)` + `clien
 A **user-pool** service (one with a `login_url`) has its own users. All `/v1/users*` and
 `/v1/login/passkey/*` calls need the service's **service token**; users are always scoped to
 the calling service. A user has one method for life: `passkey` (created via `POST /v1/users`),
-`google` (created on first Google sign-in) or `email` (a 6-digit code mailed on each sign-in,
-account created on the first correct code). No linking: the same address may own one account
-per method.
+`google` (created on first Google sign-in), `email` (a 6-digit code mailed on each sign-in,
+account created on the first correct code) or `password` (owner-provisioned only: a username
+and a bcrypt hash, made for moving an existing product's users over). No linking: the same
+address may own one account per method.
+
+**Password accounts** are keyed by `username` (case-insensitive, no spaces) and may have no
+email at all (pseudonymous study participants). They are born `email_verified` (the owner
+vouches), never receive codes or alerts, and their tokens carry `preferred_username` instead
+of, or as well as, `email`. The owner creates them one at a time with a plaintext password
+(hashed here, bcrypt cost 12) or an existing bcrypt `password_hash` copied from the old
+system. Registering a passkey **converts** the account: the method becomes `passkey` and the
+hash is deleted. Setting a new password (`POST /v1/users/{id}/password`, or the admin call)
+converts it back and removes the passkeys. Ten wrong passwords lock the username for 15
+minutes, from any address.
 
 **Email verification.** `user.email_verified` is true for Google, email-code and
 owner-provisioned accounts. An app-created passkey account starts `false` and **cannot sign
@@ -199,6 +211,8 @@ refusals are audited as `user.signup_denied`.
 | POST | `/v1/login/owner/finish?challenge=` | body: credential JSON → `{"redirect_to","subject":"owner"}`. `401 passkey_rejected`. The token minted from the code has `sub=owner` and the request's full scope |
 | POST | `/v1/login/passkey/activate/begin` | `{"login_challenge","email"}` → `{"challenge_id","expires_in"}`; mails a code to the **passkey** account created with that address (owner-provisioned, or an app sign-up on a new device). `404 not_found` on an open pool when no such account, `403 signup_closed` on an invite-only one |
 | POST | `/v1/login/passkey/activate/finish?challenge=` | `{"code"}` → `{"challenge_id","options","user"}`: WebAuthn **creation** options (the code also marks the email verified). Run `navigator.credentials.create`, then `POST /v1/users/{user.id}/passkeys/finish?challenge=&name=`, whose `201` carries `redirect_to` because the challenge completes the parked sign-in |
+| POST | `/v1/login/password` | `{"login_challenge","username","password"}` → `{"redirect_to","user"}`. `401 password_rejected` (unknown name or wrong password, deliberately the same), `400 invalid_request` for an account that uses another method, `403 account_disabled`, `429` after 10 wrong passwords on one username or 20 failures from one IP |
+| POST | `/v1/users/{id}/password` | `{"password"}` or `{"password_hash"}` (bcrypt) → `200 user`; your app's own reset flow. Converts a passkey-upgraded account back to `password` and removes its passkeys. `400` without a username |
 | POST | `/v1/login/email/begin` | `{"login_challenge","email"}` → `{"challenge_id","expires_in":600}`; a code is mailed. `403 signup_closed` for an unknown address on an invite-only pool, `403 account_disabled`, `429` |
 | POST | `/v1/login/email/finish?challenge=` | `{"code":"123456"}` → `{"redirect_to","user"}`. `401 code_rejected` (wrong, expired, used, or out of attempts: request a new one) |
 | POST | `/v1/users/{id}/email/verify/begin` | → `{"challenge_id","expires_in"}`; mails a verification code. `409 already_verified` |
@@ -206,7 +220,8 @@ refusals are audited as `user.signup_denied`.
 | GET | `/v1/login/google/start?login_challenge=` | browser endpoint, no auth; `302` to Google (404 `google_disabled` when not configured) |
 | GET | `/v1/login/google/callback` | Google returns here; `302` to the app's `redirect_uri` with `code`, or back to `login_url?login_challenge=&error=` |
 
-`user` = `{"id":"usr_…","service_id","method","email","email_verified","name","roles":[…],"status","created_at","last_login_at"?}`.
+`user` = `{"id":"usr_…","service_id","method","email","email_verified","name","roles":[…],"status","created_at","last_login_at"?,"username"?}`.
+The password hash is never returned.
 
 ### Teams and organisations
 
@@ -300,7 +315,8 @@ All under `/admin`. Auth: admin session cookie or admin bearer. **fresh** = step
 | GET | `/admin/services/{id}` | `service` |
 | POST | `/admin/services/{id}/resources` | `{"resource":"https://finforge.nathanblatter.com/mcp"}` → `200 service`. Absolute https URL, unique across services |
 | PUT | `/admin/services/{id}/login` | `{"login_url","rp_id","origins":[…],"default_roles":[…],"open_signup":false}` → `200 service`. Empty `login_url` = owner-only (and `open_signup` is forced off). `rp_id` must be a registrable suffix of every origin; default roles must exist |
-| POST | `/admin/services/{id}/users` | `{"email","name"?,"method":"passkey|google|email"}` (default `passkey`) → `201 user` (born `email_verified`), whatever `open_signup` says. `409 identity_taken`, `409 service_not_configured` on an owner-only service |
+| POST | `/admin/services/{id}/users` | `{"email","name"?,"method":"passkey|google|email"}` (default `passkey`) → `201 user` (born `email_verified`), whatever `open_signup` says. `409 identity_taken`, `409 service_not_configured` on an owner-only service. Method `password`: `{"method":"password","username","password"\|"password_hash","name"?,"email"?,"roles"?}` (roles default to the service's `default_roles`) |
+| POST | `/admin/services/{id}/users/{user}/password` | `{"password"}` or `{"password_hash"}` → `200 user`; the owner's reset for a password (or passkey-converted) account |
 | GET | `/admin/services/{id}/users?limit=50&cursor=` | `{"users":[user],"next"}` |
 | GET | `/admin/services/{id}/orgs?limit=50&cursor=` | `{"orgs":[org],"next"}` (read-only view of the service's teams) |
 | GET | `/admin/services/{id}/orgs/{org}/members` | `{"members":[…]}` as the service-token call |
@@ -326,7 +342,7 @@ All under `/admin`. Auth: admin session cookie or admin bearer. **fresh** = step
 
 Event kinds: `service.create`, `service.resource.add`, `service.permissions.set`, `service.login.set`,
 `user.create`, `user.provision`, `user.signup_denied`, `user.google.bind`, `user.email_code.sent`, `user.email.verified`, `user.passkey.register`, `user.login.alerted`, `user.login.alert_suppressed`, `user.update`, `user.login`, `user.login_denied`, `user.logout_everywhere`,
-`user.passkey.register`, `user.export`, `user.delete`, `org.create`, `org.update`, `org.delete`,
+`user.passkey.register`, `user.password.set`, `user.method.converted`, `user.export`, `user.delete`, `org.create`, `org.update`, `org.delete`,
 `org.member.set`, `org.member.remove`, `org.invite.create`, `org.invite.revoke`,
 `org.invite.accepted`, `credential.mint`, `credential.revoke`,
 `token.issue`, `token.denied`, `passkey.register`, `owner.login`, `owner.login_denied`,

@@ -556,6 +556,7 @@ func (m *Memory) UpdateUser(_ context.Context, u User) error {
 		return ErrNotFound
 	}
 	cur.Email, cur.Name, cur.Status, cur.NotBefore, cur.EmailVerified, cur.LastLoginAt = u.Email, u.Name, u.Status, u.NotBefore, u.EmailVerified, u.LastLoginAt
+	cur.Method, cur.Username, cur.PasswordHash = u.Method, u.Username, u.PasswordHash
 	cur.Roles = append([]string(nil), u.Roles...)
 	m.users[ukey(u.ServiceID, u.ID)] = cur
 	return nil
@@ -628,6 +629,17 @@ func (m *Memory) GetUserPasskeyByCred(_ context.Context, serviceID, credID strin
 		return UserPasskey{}, ErrNotFound
 	}
 	return p, nil
+}
+
+func (m *Memory) DeleteUserPasskey(_ context.Context, serviceID, userID, credID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, ok := m.upks[ukey(serviceID, credID)]
+	if !ok || p.UserID != userID {
+		return ErrNotFound
+	}
+	delete(m.upks, ukey(serviceID, credID))
+	return nil
 }
 
 func (m *Memory) DeleteUser(_ context.Context, serviceID, id string) error {

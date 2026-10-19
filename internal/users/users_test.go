@@ -17,6 +17,7 @@ func newUsers(t *testing.T) (*Users, *store.Memory, store.Service) {
 	t.Helper()
 	mem := store.NewMemory()
 	u := New(mem)
+	u.Cost = 4 // bcrypt.MinCost: keep password tests fast
 	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
 	u.Now = func() time.Time { return now }
 	ctx := context.Background()

@@ -1,7 +1,7 @@
 // Package users is slice 3: end users of a product. A user belongs to one
-// service, has exactly one login method for life (passkey, Google or email code), and
-// signs in through the product's own screens; this package owns the
-// ceremonies and the account records.
+// service, has exactly one login method for life (passkey, Google, email
+// code or password), and signs in through the product's own screens; this
+// package owns the ceremonies and the account records.
 package users
 
 import (
@@ -29,9 +29,10 @@ import (
 )
 
 const (
-	MethodPasskey = "passkey"
-	MethodGoogle  = "google"
-	MethodEmail   = "email"
+	MethodPasskey  = "passkey"
+	MethodGoogle   = "google"
+	MethodEmail    = "email"
+	MethodPassword = "password"
 
 	// CodeTTL is how long a sign-in / verification code stays valid.
 	CodeTTL = 10 * time.Minute
@@ -48,7 +49,7 @@ var (
 	ErrNotUserPool     = errors.New("users: service has no login_url (owner-only)")
 	ErrNoWebAuthn      = errors.New("users: service has no rp_id/origins configured")
 	ErrInvalidEmail    = errors.New("users: invalid email")
-	ErrInvalidMethod   = errors.New("users: method must be passkey or google")
+	ErrInvalidMethod   = errors.New("users: method must be passkey, google, email or password")
 	ErrIdentityTaken   = errors.New("users: an account with this identity already exists")
 	ErrUserNotFound    = errors.New("users: user not found")
 	ErrCeremony        = errors.New("users: ceremony failed")
@@ -77,6 +78,11 @@ type Users struct {
 	// AlertAllowed, when set, caps new-login alerts per account (the HTTP
 	// layer wires the rate limiter in); nil = no cap.
 	AlertAllowed func(ctx context.Context, userID string) bool
+	// Cost is the bcrypt cost for passwords hashed here; 0 = DefaultBcryptCost.
+	Cost int
+
+	dummyOnce sync.Once
+	dummy     []byte
 
 	mu sync.Mutex
 	wa map[string]*webauthn.WebAuthn // keyed by service id + config fingerprint
@@ -331,7 +337,7 @@ type waUser struct {
 }
 
 func (w waUser) WebAuthnID() []byte                         { return []byte(w.user.ID) }
-func (w waUser) WebAuthnName() string                       { return w.user.Email }
+func (w waUser) WebAuthnName() string                       { return loginName(w.user) }
 func (w waUser) WebAuthnDisplayName() string                { return nameOr(w.user) }
 func (w waUser) WebAuthnCredentials() []webauthn.Credential { return w.creds }
 
@@ -339,7 +345,16 @@ func nameOr(u store.User) string {
 	if u.Name != "" {
 		return u.Name
 	}
-	return u.Email
+	return loginName(u)
+}
+
+// loginName is what the person types or sees as their account name: the
+// email, or the username on name-based accounts.
+func loginName(u store.User) string {
+	if u.Email != "" {
+		return u.Email
+	}
+	return u.Username
 }
 
 func (u *Users) loadWAUser(ctx context.Context, user store.User) (waUser, []store.UserPasskey, error) {
@@ -370,7 +385,9 @@ func (u *Users) BeginRegisterPasskey(ctx context.Context, svc store.Service, use
 // beginRegister builds registration options. authzID, when set, rides on the
 // challenge so a successful registration also completes that sign-in.
 func (u *Users) beginRegister(ctx context.Context, svc store.Service, user store.User, authzID string) (*protocol.CredentialCreation, string, error) {
-	if user.Method != MethodPasskey {
+	// A password account may register a passkey: that converts it (see
+	// convertToPasskey), honouring one method for life.
+	if user.Method != MethodPasskey && user.Method != MethodPassword {
 		return nil, "", ErrWrongMethod
 	}
 	wa, err := u.webauthnFor(svc)
@@ -439,6 +456,11 @@ func (u *Users) FinishRegisterPasskey(ctx context.Context, svc store.Service, ch
 		return store.UserPasskey{}, "", err
 	}
 	u.audit(ctx, "user.passkey.register", svc.ID, user.ID, "pk="+pk.ID, clientIP(r))
+	if user.Method == MethodPassword {
+		if user, err = u.convertToPasskey(ctx, svc, user, clientIP(r)); err != nil {
+			return store.UserPasskey{}, "", err
+		}
+	}
 	if ch.AuthzID != "" {
 		u.audit(ctx, "user.login", svc.ID, user.ID, "passkey activation", clientIP(r))
 		u.noteLogin(ctx, svc, user, "new passkey", clientIP(r))

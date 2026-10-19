@@ -1085,6 +1085,8 @@ type userItem struct {
 	Method                 string   `dynamodbav:"method"`
 	Identity               string   `dynamodbav:"identity"`
 	Email                  string   `dynamodbav:"email,omitempty"`
+	Username               string   `dynamodbav:"username,omitempty"`
+	PasswordHash           string   `dynamodbav:"password_hash,omitempty"`
 	Name                   string   `dynamodbav:"name,omitempty"`
 	Roles                  []string `dynamodbav:"roles,omitempty"`
 	Status                 string   `dynamodbav:"status"`
@@ -1101,14 +1103,14 @@ func (it userItem) toUser() (User, error) {
 	}
 	nb, _ := time.Parse(time.RFC3339Nano, it.NotBefore)
 	ll, _ := time.Parse(time.RFC3339Nano, it.LastLoginAt)
-	return User{ID: it.ID, ServiceID: it.ServiceID, Method: it.Method, Identity: it.Identity, Email: it.Email, Name: it.Name,
+	return User{ID: it.ID, ServiceID: it.ServiceID, Method: it.Method, Identity: it.Identity, Email: it.Email, Username: it.Username, PasswordHash: it.PasswordHash, Name: it.Name,
 		Roles: it.Roles, Status: it.Status, CreatedAt: t, NotBefore: nb, EmailVerified: it.EmailVerified, LastLoginAt: ll}, nil
 }
 
 func (d *Dynamo) CreateUser(ctx context.Context, u User) error {
 	item, err := attributevalue.MarshalMap(userItem{
 		PK: pkUser + u.ServiceID + "#" + u.ID, SK: skMeta, GSI1PK: gsiUsers + u.ServiceID, GSI1SK: u.CreatedAt.UTC().Format(time.RFC3339Nano) + "#" + u.ID,
-		Type: "user", ID: u.ID, ServiceID: u.ServiceID, Method: u.Method, Identity: u.Identity, Email: u.Email, Name: u.Name,
+		Type: "user", ID: u.ID, ServiceID: u.ServiceID, Method: u.Method, Identity: u.Identity, Email: u.Email, Username: u.Username, PasswordHash: u.PasswordHash, Name: u.Name,
 		Roles: u.Roles, Status: u.Status, CreatedAt: u.CreatedAt.UTC().Format(time.RFC3339Nano), NotBefore: fmtTime(u.NotBefore),
 		EmailVerified: u.EmailVerified, LastLoginAt: fmtTime(u.LastLoginAt),
 	})
@@ -1215,11 +1217,14 @@ func (d *Dynamo) UpdateUser(ctx context.Context, u User) error {
 	_, err := d.db.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:                &d.table,
 		Key:                      dynKey(pkUser+u.ServiceID+"#"+u.ID, skMeta),
-		UpdateExpression:         aws.String("SET email = :e, #n = :n, #r = :r, #s = :s, sessions_not_before = :nb, email_verified = :v, last_login_at = :ll"),
+		UpdateExpression:         aws.String("SET email = :e, #n = :n, #r = :r, #s = :s, sessions_not_before = :nb, email_verified = :v, last_login_at = :ll, #m = :m, username = :un, password_hash = :ph"),
 		ConditionExpression:      aws.String("attribute_exists(PK)"),
-		ExpressionAttributeNames: map[string]string{"#n": "name", "#r": "roles", "#s": "status"},
+		ExpressionAttributeNames: map[string]string{"#n": "name", "#r": "roles", "#s": "status", "#m": "method"},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":e":  &types.AttributeValueMemberS{Value: u.Email},
+			":m":  &types.AttributeValueMemberS{Value: u.Method},
+			":un": &types.AttributeValueMemberS{Value: u.Username},
+			":ph": &types.AttributeValueMemberS{Value: u.PasswordHash},
 			":n":  &types.AttributeValueMemberS{Value: u.Name},
 			":r":  &types.AttributeValueMemberL{Value: roles},
 			":s":  &types.AttributeValueMemberS{Value: u.Status},
@@ -1376,6 +1381,18 @@ func (d *Dynamo) ListUserPasskeys(ctx context.Context, serviceID, userID string)
 		keys = append(keys, k)
 	}
 	return keys, nil
+}
+
+func (d *Dynamo) DeleteUserPasskey(ctx context.Context, serviceID, userID, credID string) error {
+	_, err := d.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: &d.table, Key: dynKey(pkUser+serviceID+"#"+userID, skPasskey+credID),
+		ConditionExpression: aws.String("attribute_exists(PK)"),
+	})
+	var cond *types.ConditionalCheckFailedException
+	if errors.As(err, &cond) {
+		return ErrNotFound
+	}
+	return err
 }
 
 func (d *Dynamo) GetUserPasskeyByCred(ctx context.Context, serviceID, credID string) (UserPasskey, error) {

@@ -37,6 +37,9 @@ func (s *Server) userRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /v1/login/owner/finish", s.requireService(s.loginOwnerFinish))
 	mux.HandleFunc("POST /v1/login/passkey/activate/begin", s.requireService(s.loginPasskeyActivateBegin))
 	mux.HandleFunc("POST /v1/login/passkey/activate/finish", s.requireService(s.loginPasskeyActivateFinish))
+	mux.HandleFunc("POST /v1/login/password", s.requireService(s.loginPassword))
+	mux.HandleFunc("POST /v1/users/{id}/password", s.requireService(s.setUserPassword))
+	mux.HandleFunc("POST /admin/services/{id}/users/{user}/password", s.requireAdmin(s.adminSetUserPassword))
 	mux.HandleFunc("POST /v1/login/email/begin", s.requireService(s.loginEmailBegin))
 	mux.HandleFunc("POST /v1/login/email/finish", s.requireService(s.loginEmailFinish))
 	mux.HandleFunc("POST /v1/users/{id}/email/verify/begin", s.requireService(s.userVerifyEmailBegin))
@@ -82,8 +85,11 @@ func (s *Server) userFail(w http.ResponseWriter, err error) bool {
 		writeJSON(w, 409, map[string]string{"error": "identity_taken"})
 	case errors.Is(err, users.ErrNotUserPool), errors.Is(err, users.ErrNoWebAuthn):
 		writeJSON(w, 409, map[string]string{"error": "service_not_configured", "detail": err.Error()})
-	case errors.Is(err, users.ErrInvalidEmail), errors.Is(err, users.ErrInvalidRole), errors.Is(err, users.ErrWrongMethod), errors.Is(err, users.ErrInvalidMethod):
+	case errors.Is(err, users.ErrInvalidEmail), errors.Is(err, users.ErrInvalidRole), errors.Is(err, users.ErrWrongMethod), errors.Is(err, users.ErrInvalidMethod),
+		errors.Is(err, users.ErrInvalidUsername), errors.Is(err, users.ErrWeakPassword), errors.Is(err, users.ErrInvalidHash), errors.Is(err, users.ErrNoPassword):
 		writeJSON(w, 400, map[string]string{"error": "invalid_request", "detail": err.Error()})
+	case errors.Is(err, users.ErrPasswordRejected):
+		writeJSON(w, 401, map[string]string{"error": "password_rejected", "detail": "wrong username or password"})
 	case errors.Is(err, users.ErrSignupClosed):
 		writeJSON(w, 403, map[string]string{"error": "signup_closed", "detail": "this service does not accept sign-ups; the owner creates accounts"})
 	case errors.Is(err, users.ErrEmailDisabled):
@@ -111,6 +117,9 @@ func userJSON(u store.User) map[string]any {
 	}
 	out := map[string]any{"id": u.ID, "service_id": u.ServiceID, "method": u.Method, "email": u.Email, "email_verified": u.EmailVerified, "name": u.Name,
 		"roles": roles, "status": u.Status, "created_at": u.CreatedAt.UTC().Format(time.RFC3339)}
+	if u.Username != "" {
+		out["username"] = u.Username
+	}
 	if !u.LastLoginAt.IsZero() {
 		out["last_login_at"] = u.LastLoginAt.UTC().Format(time.RFC3339)
 	}
@@ -568,18 +577,105 @@ func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var in struct{ Email, Name, Method string }
+	var in struct {
+		Email, Name, Method string
+		Username            string   `json:"username"`
+		Password            string   `json:"password"`
+		PasswordHash        string   `json:"password_hash"`
+		Roles               []string `json:"roles"`
+	}
 	if !readJSON(w, r, &in) {
 		return
 	}
 	if in.Method == "" {
 		in.Method = users.MethodPasskey
 	}
-	u, err := s.Users.Provision(r.Context(), svc, in.Method, in.Email, in.Name)
+	var u store.User
+	var err error
+	if in.Method == users.MethodPassword {
+		u, err = s.Users.ProvisionPassword(r.Context(), svc, users.PasswordAccount{Username: in.Username, Name: in.Name, Email: in.Email, Roles: in.Roles, Password: in.Password, PasswordHash: in.PasswordHash})
+	} else {
+		u, err = s.Users.Provision(r.Context(), svc, in.Method, in.Email, in.Name)
+	}
 	if s.userFail(w, err) {
 		return
 	}
 	writeJSON(w, 201, userJSON(u))
+}
+
+// loginPassword signs a password account in for a parked authorization.
+// Failures count against the IP and against the username, so one account
+// cannot be guessed at from many addresses.
+func (s *Server) loginPassword(w http.ResponseWriter, r *http.Request) {
+	svc, ok := s.callerService(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		LoginChallenge string `json:"login_challenge"`
+		Username       string `json:"username"`
+		Password       string `json:"password"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	if !s.pendingFor(w, r, svc, in.LoginChallenge) {
+		return
+	}
+	ipKey := "login:ip:" + clientIP(r)
+	userKey := "login:user:" + svc.ID + "#" + strings.ToLower(strings.TrimSpace(in.Username))
+	if !s.Limit.Allow(r.Context(), ratelimit.LoginIP, ipKey) {
+		tooMany(w, ratelimit.LoginIP)
+		return
+	}
+	if !s.Limit.Allow(r.Context(), ratelimit.LoginUser, userKey) {
+		tooMany(w, ratelimit.LoginUser)
+		return
+	}
+	user, authzID, err := s.Users.LoginPassword(r.Context(), svc, in.LoginChallenge, in.Username, in.Password, clientIP(r))
+	if errors.Is(err, users.ErrPasswordRejected) {
+		s.Limit.Fail(r.Context(), ratelimit.LoginIP, ipKey)
+		s.Limit.Fail(r.Context(), ratelimit.LoginUser, userKey)
+	}
+	if s.userFail(w, err) {
+		return
+	}
+	loc, err := s.OAuth.CompleteForUser(r.Context(), authzID, user, users.AllowedScopes(svc, user), clientIP(r))
+	if s.completeFail(w, err) {
+		return
+	}
+	writeJSON(w, 200, map[string]any{"redirect_to": loc, "user": userJSON(user)})
+}
+
+func (s *Server) writeSetPassword(w http.ResponseWriter, r *http.Request, svc store.Service, userID string) {
+	var in struct {
+		Password     string `json:"password"`
+		PasswordHash string `json:"password_hash"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	u, err := s.Users.SetPassword(r.Context(), svc, userID, in.Password, in.PasswordHash, clientIP(r))
+	if s.userFail(w, err) {
+		return
+	}
+	writeJSON(w, 200, userJSON(u))
+}
+
+func (s *Server) setUserPassword(w http.ResponseWriter, r *http.Request) {
+	svc, ok := s.callerService(w, r)
+	if !ok {
+		return
+	}
+	s.writeSetPassword(w, r, svc, r.PathValue("id"))
+}
+
+func (s *Server) adminSetUserPassword(w http.ResponseWriter, r *http.Request) {
+	svc, ok := s.adminService(w, r)
+	if !ok {
+		return
+	}
+	s.writeSetPassword(w, r, svc, r.PathValue("user"))
 }
 
 func (s *Server) adminListUsers(w http.ResponseWriter, r *http.Request) {

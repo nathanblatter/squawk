@@ -626,7 +626,7 @@
         <label class="row check muted fine mt2"><input type="checkbox" class="login-open"> Open to the public: anyone can sign up (Google, an email code, or the app's sign-up form). Off = invite-only, you add every account below.</label>
         <p class="muted fine">Leave the login URL empty for an owner-only service (connectors approved by you). With a login URL, the app's own page signs users in with passkeys or Google.</p>
         <div class="users"></div>
-        <div class="row user-add mt2${svc.login_url ? '' : ' hidden'}"><input class="grow user-email" placeholder="email"><input class="grow user-name" placeholder="name (optional)"><select class="user-method"><option value="passkey">passkey</option><option value="google">google</option><option value="email">email code</option></select><button class="small user-create">Add account</button></div>
+        <div class="row user-add mt2${svc.login_url ? '' : ' hidden'}"><input class="grow user-email" placeholder="email"><input class="grow user-name" placeholder="name (optional)"><select class="user-method"><option value="passkey">passkey</option><option value="google">google</option><option value="email">email code</option><option value="password">password</option></select><input class="grow user-username hidden" placeholder="username"><input class="grow user-password hidden" type="password" placeholder="password" autocomplete="new-password"><button class="small user-create">Add account</button></div>
       </details>
       <details class="orgs-details${svc.login_url ? '' : ' hidden'}"><summary>Teams</summary>
         <p class="muted fine">Organisations the app's users created (a practice, a company). Members, their org role and emailed invites are managed by the app under its service token; this view is read-only.</p>
@@ -706,11 +706,11 @@
           usersEl.innerHTML = '';
           if (!users.length) { usersEl.innerHTML = '<p class="muted">No accounts yet.</p>'; return; }
           const t = document.createElement('table');
-          t.innerHTML = '<tr><th>Email</th><th>Name</th><th>Method</th><th>Roles</th><th>Status</th><th>Created</th></tr>';
+          t.innerHTML = '<tr><th>Account</th><th>Name</th><th>Method</th><th>Roles</th><th>Status</th><th>Created</th></tr>';
           for (const u of users) {
             const tr = document.createElement('tr');
             tr.innerHTML = '<td class="mono"></td><td></td><td class="mono muted"></td><td class="mono muted"></td><td></td><td class="muted"></td>';
-            tr.children[0].textContent = u.email; tr.children[1].textContent = u.name || '';
+            tr.children[0].textContent = u.email || u.username || ''; tr.children[1].textContent = u.name || '';
             tr.children[2].textContent = u.method; tr.children[3].textContent = (u.roles || []).join(' ');
             tr.children[4].innerHTML = u.status === 'active' ? '<span class="pill ok">active</span>' : '<span class="pill off">disabled</span>';
             tr.children[5].textContent = fmt(u.created_at);
@@ -720,12 +720,20 @@
         } catch (e) { msg.textContent = e.message; msg.className = 'msg err'; }
       };
       details.addEventListener('toggle', () => { if (details.open && !loaded) { loaded = true; loadUsers(); } });
+      const methodSel = wrap.querySelector('.user-method');
+      const onMethod = () => {
+        const pw = methodSel.value === 'password';
+        wrap.querySelector('.user-username').classList.toggle('hidden', !pw);
+        wrap.querySelector('.user-password').classList.toggle('hidden', !pw);
+        wrap.querySelector('.user-email').placeholder = pw ? 'email (optional)' : 'email';
+      };
+      methodSel.addEventListener('change', onMethod);
       wrap.querySelector('.user-create').onclick = async () => {
         try {
-          await api('POST', `/admin/services/${svc.id}/users`, {
-            email: wrap.querySelector('.user-email').value.trim(), name: wrap.querySelector('.user-name').value.trim(),
-            method: wrap.querySelector('.user-method').value });
-          wrap.querySelector('.user-email').value = ''; wrap.querySelector('.user-name').value = '';
+          const body = { email: wrap.querySelector('.user-email').value.trim(), name: wrap.querySelector('.user-name').value.trim(), method: methodSel.value };
+          if (methodSel.value === 'password') { body.username = wrap.querySelector('.user-username').value.trim(); body.password = wrap.querySelector('.user-password').value; }
+          await api('POST', `/admin/services/${svc.id}/users`, body);
+          wrap.querySelector('.user-email').value = ''; wrap.querySelector('.user-name').value = ''; wrap.querySelector('.user-username').value = ''; wrap.querySelector('.user-password').value = '';
           msg.textContent = ''; msg.className = 'msg';
           await loadUsers();
         } catch (e) { msg.textContent = e.message; msg.className = 'msg err'; }

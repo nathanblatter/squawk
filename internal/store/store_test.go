@@ -472,6 +472,35 @@ func conformance(t *testing.T, s Store) {
 	if list, _ := s.ListEmailInvites(ctx, "svc_a", "carol@x.test"); len(list) != 0 {
 		t.Fatalf("invites must die with the org: %+v", list)
 	}
+
+	// Password accounts: username and hash round-trip, and UpdateUser may
+	// change the method (passkey conversion) and clear the hash.
+	pw := User{ID: "u9", ServiceID: "svc_a", Method: "password", Identity: "username:jdoe", Username: "JDoe", PasswordHash: "$2a$04$hash", Roles: []string{"user"}, Status: "active", CreatedAt: now, EmailVerified: true}
+	if err := s.CreateUser(ctx, pw); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetUserByIdentity(ctx, "svc_a", "username:jdoe"); err != nil || got.Username != "JDoe" || got.PasswordHash != "$2a$04$hash" || got.Email != "" {
+		t.Fatalf("password user: %+v %v", got, err)
+	}
+	pw.Method, pw.PasswordHash = "passkey", ""
+	if err := s.UpdateUser(ctx, pw); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetUser(ctx, "svc_a", "u9"); got.Method != "passkey" || got.PasswordHash != "" || got.Username != "JDoe" {
+		t.Fatalf("converted user: %+v", got)
+	}
+	if err := s.PutUserPasskey(ctx, UserPasskey{ServiceID: "svc_a", UserID: "u9", ID: "cred9", Name: "Phone", CreatedAt: now, Data: []byte("{}")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUserPasskey(ctx, "svc_a", "u9", "cred9"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUserPasskey(ctx, "svc_a", "u9", "cred9"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing passkey: %v", err)
+	}
+	if _, err := s.GetUserPasskeyByCred(ctx, "svc_a", "cred9"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted passkey still found by cred: %v", err)
+	}
 	if _, err := s.GetOrg(ctx, "svc_a", "org2"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted org: %v", err)
 	}

@@ -42,14 +42,21 @@ type Service struct {
 type User struct {
 	ID        string
 	ServiceID string
-	Method    string // passkey | google
-	Identity  string // "google:<sub>" or "email:<email>"; unique per service
-	Email     string
-	Name      string
-	Roles     []string
-	Status    string // active | disabled
-	CreatedAt time.Time
-	NotBefore time.Time // sessions/refresh tokens issued before this are dead
+	Method    string // passkey | google | email | password
+	Identity  string // "google:<sub>", "email:<email>", "emailcode:<email>" or "username:<name>"; unique per service
+	Email     string // may be empty for username accounts (pseudonymous users)
+	// Username is set on accounts that sign in by name (password method,
+	// or a passkey account converted from one); display form, identity
+	// holds the lower-cased key.
+	Username string
+	// PasswordHash is the bcrypt hash of a password account; empty
+	// otherwise. It never leaves the store layer in API responses.
+	PasswordHash string
+	Name         string
+	Roles        []string
+	Status       string // active | disabled
+	CreatedAt    time.Time
+	NotBefore    time.Time // sessions/refresh tokens issued before this are dead
 	// EmailVerified: the address was proven (Google, email code, or the owner).
 	// App-created passkey accounts start false and cannot sign in until verified.
 	EmailVerified bool
@@ -256,6 +263,7 @@ type Store interface {
 	UpdateUserPasskey(ctx context.Context, p UserPasskey) error
 	ListUserPasskeys(ctx context.Context, serviceID, userID string) ([]UserPasskey, error)
 	GetUserPasskeyByCred(ctx context.Context, serviceID, credID string) (UserPasskey, error)
+	DeleteUserPasskey(ctx context.Context, serviceID, userID, credID string) error // ErrNotFound
 	GetServiceByResource(ctx context.Context, resource string) (Service, error)
 
 	PutCredential(ctx context.Context, c Credential) error

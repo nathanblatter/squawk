@@ -53,6 +53,9 @@ type Claims struct {
 	Audience string `json:"aud"`
 	Scope    string `json:"scope"`
 	Email    string `json:"email,omitempty"`
+	// PreferredUsername is present on accounts that sign in by name (the
+	// password method); such accounts may have no email at all.
+	PreferredUsername string `json:"preferred_username,omitempty"`
 	// EmailVerified is true once the user's address was proven.
 	EmailVerified bool `json:"email_verified,omitempty"`
 	// Org and OrgRole are present when the token was issued in an org

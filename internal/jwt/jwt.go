@@ -27,6 +27,9 @@ type Claims struct {
 	Scope    string `json:"scope,omitempty"`
 	ClientID string `json:"client_id,omitempty"`
 	Email    string `json:"email,omitempty"`
+	// PreferredUsername is set on tokens of accounts that sign in by name
+	// (password method, or a passkey account converted from one).
+	PreferredUsername string `json:"preferred_username,omitempty"`
 	// EmailVerified is set on user tokens once the address is proven
 	// (Google asserted it, an email code was entered, or the owner vouched).
 	EmailVerified bool `json:"email_verified,omitempty"`

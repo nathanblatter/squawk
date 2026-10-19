@@ -28,6 +28,8 @@ var (
 	TokenClient = Policy{Limit: 10, Window: 15 * time.Minute}
 	// LoginIP: failed passkey sign-ins or registrations from one IP.
 	LoginIP = Policy{Limit: 20, Window: 10 * time.Minute}
+	// LoginUser: wrong passwords against one username, from anywhere.
+	LoginUser = Policy{Limit: 10, Window: 15 * time.Minute}
 	// EmailSend: sign-in / verification codes sent to one address. Counts
 	// sends, not failures: it caps how much mail a stranger can trigger.
 	EmailSend = Policy{Limit: 5, Window: 15 * time.Minute}

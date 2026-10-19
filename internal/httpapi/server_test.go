@@ -1362,3 +1362,93 @@ func TestOrgHTTP(t *testing.T) {
 		t.Fatalf("disabled org must bounce: %v", loc)
 	}
 }
+
+func TestOrgInviteHTTP(t *testing.T) {
+	ts, _ := newServerWithStore(t, "https://auth.test")
+	srv := lastServer
+	admin := "Bearer " + adminToken
+	mail := &captureMail{}
+	srv.Users.Mail = mail
+
+	_, svc := do(t, "POST", ts.URL+"/admin/services", admin, "application/json", `{"name":"Therapist","slug":"therapist"}`)
+	id := svc["id"].(string)
+	do(t, "PUT", ts.URL+"/admin/services/"+id+"/permissions", admin, "application/json", `{"scopes":["read"],"roles":{"user":["read"]}}`)
+	do(t, "PUT", ts.URL+"/admin/services/"+id+"/login", admin, "application/json", `{"login_url":"https://therapist.test/login","rp_id":"therapist.test","origins":["https://therapist.test"],"default_roles":["user"],"open_signup":true}`)
+	_, cred := do(t, "POST", ts.URL+"/admin/services/"+id+"/credentials", admin, "", "")
+	form := url.Values{"grant_type": {"client_credentials"}, "client_id": {id}, "client_secret": {cred["credential"].(string)}}
+	_, tk := do(t, "POST", ts.URL+"/v1/token", "", "application/x-www-form-urlencoded", form.Encode())
+	svcTok := "Bearer " + tk["access_token"].(string)
+	_, alice := do(t, "POST", ts.URL+"/admin/services/"+id+"/users", admin, "application/json", `{"email":"alice@x.test","method":"email","name":"Alice"}`)
+	aliceID := alice["id"].(string)
+	_, org := do(t, "POST", ts.URL+"/v1/orgs", svcTok, "application/json", `{"name":"Sunny Practice","admin_user_id":"`+aliceID+`"}`)
+	orgID := org["id"].(string)
+	inviteURL := ts.URL + "/v1/orgs/" + orgID + "/invites"
+
+	if code, _ := do(t, "POST", inviteURL, "", "application/json", `{}`); code != 401 {
+		t.Fatalf("invite without service token: %d", code)
+	}
+	if code, body := do(t, "POST", inviteURL, svcTok, "application/json", `{"email":"carol@x.test","role":"boss"}`); code != 400 || body["error"] != "invalid_request" {
+		t.Fatalf("bad role: %d %v", code, body)
+	}
+	if code, body := do(t, "POST", inviteURL, svcTok, "application/json", `{"email":"alice@x.test","role":"member"}`); code != 409 || body["error"] != "already_member" {
+		t.Fatalf("invite a member: %d %v", code, body)
+	}
+	code, inv := do(t, "POST", inviteURL, svcTok, "application/json", `{"email":"Carol@x.test","role":"member","invited_by":"`+aliceID+`"}`)
+	if code != 201 || inv["email"] != "carol@x.test" || inv["role"] != "member" || inv["invited_by"] != aliceID {
+		t.Fatalf("invite: %d %v", code, inv)
+	}
+	if mail.to != "carol@x.test" || !strings.Contains(mail.text, "Alice (Therapist)") || !strings.Contains(mail.text, "Sunny Practice") {
+		t.Fatalf("mail: to=%q text=%q", mail.to, mail.text)
+	}
+	if code, body := do(t, "GET", inviteURL, svcTok, "", ""); code != 200 || len(body["invites"].([]any)) != 1 {
+		t.Fatalf("list invites: %d %v", code, body)
+	}
+	if code, body := do(t, "GET", ts.URL+"/admin/services/"+id+"/orgs/"+orgID+"/invites", admin, "", ""); code != 200 || len(body["invites"].([]any)) != 1 {
+		t.Fatalf("admin list invites: %d %v", code, body)
+	}
+	// Sends to one address are capped like sign-in codes.
+	for i := 0; i < 6; i++ {
+		code, body := do(t, "POST", inviteURL, svcTok, "application/json", `{"email":"spam@x.test","role":"member"}`)
+		if i < 4 && code != 201 {
+			t.Fatalf("invite %d: %d %v", i, code, body)
+		}
+		if i == 5 && code != 429 {
+			t.Fatalf("sixth invite to one address must be limited: %d %v", code, body)
+		}
+	}
+	if code, _ := do(t, "DELETE", inviteURL+"/spam@x.test", svcTok, "", ""); code != 204 {
+		t.Fatalf("revoke: %d", code)
+	}
+	if code, body := do(t, "DELETE", inviteURL+"/spam@x.test", svcTok, "", ""); code != 404 || body["error"] != "invite_not_found" {
+		t.Fatalf("revoke twice: %d %v", code, body)
+	}
+
+	// Carol signs in with a code (open pool): the invite becomes a membership.
+	_, reg := do(t, "POST", ts.URL+"/oauth/register", "", "application/json", `{"client_name":"Therapist web","redirect_uris":["https://therapist.test/cb"],"token_endpoint_auth_method":"none"}`)
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	sum := sha256.Sum256([]byte(strings.Repeat("v", 43)))
+	q := url.Values{"client_id": {reg["client_id"].(string)}, "redirect_uri": {"https://therapist.test/cb"}, "response_type": {"code"}, "state": {"s1"},
+		"resource": {"https://therapist.test/api"}, "scope": {"read"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(sum[:])}, "code_challenge_method": {"S256"}}
+	do(t, "POST", ts.URL+"/admin/services/"+id+"/resources", admin, "application/json", `{"resource":"https://therapist.test/api"}`)
+	resp, _ := noRedirect.Get(ts.URL + "/oauth/authorize?" + q.Encode())
+	resp.Body.Close()
+	loc, _ := url.Parse(resp.Header.Get("Location"))
+	lc := loc.Query().Get("login_challenge")
+	_, begin := do(t, "POST", ts.URL+"/v1/login/email/begin", svcTok, "application/json", `{"login_challenge":"`+lc+`","email":"carol@x.test"}`)
+	if code, body := do(t, "POST", ts.URL+"/v1/login/email/finish?challenge="+begin["challenge_id"].(string), svcTok, "application/json", `{"code":"`+mail.code(t)+`"}`); code != 200 {
+		t.Fatalf("carol sign-in: %d %v", code, body)
+	}
+	_, members := do(t, "GET", ts.URL+"/v1/orgs/"+orgID+"/members", svcTok, "", "")
+	found := false
+	for _, m := range members["members"].([]any) {
+		if mm := m.(map[string]any); mm["email"] == "carol@x.test" && mm["role"] == "member" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("carol must be a member after signing in: %v", members)
+	}
+	if code, body := do(t, "GET", inviteURL, svcTok, "", ""); code != 200 || len(body["invites"].([]any)) != 0 {
+		t.Fatalf("invite must be consumed: %d %v", code, body)
+	}
+}

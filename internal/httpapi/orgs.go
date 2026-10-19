@@ -3,8 +3,10 @@ package httpapi
 import (
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/nathanblatter/squawk/internal/ratelimit"
 	"github.com/nathanblatter/squawk/internal/store"
 	"github.com/nathanblatter/squawk/internal/users"
 )
@@ -24,8 +26,17 @@ func (s *Server) orgRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /v1/orgs/{id}/members/{user}", s.requireService(s.setOrgMember))
 	mux.HandleFunc("DELETE /v1/orgs/{id}/members/{user}", s.requireService(s.removeOrgMember))
 	mux.HandleFunc("GET /v1/users/{id}/orgs", s.requireService(s.userOrgs))
+	mux.HandleFunc("POST /v1/orgs/{id}/invites", s.requireService(s.inviteOrgMember))
+	mux.HandleFunc("GET /v1/orgs/{id}/invites", s.requireService(s.listOrgInvites))
+	mux.HandleFunc("DELETE /v1/orgs/{id}/invites/{email}", s.requireService(s.revokeOrgInvite))
 	mux.HandleFunc("GET /admin/services/{id}/orgs", s.requireAdmin(s.adminListOrgs))
 	mux.HandleFunc("GET /admin/services/{id}/orgs/{org}/members", s.requireAdmin(s.adminListOrgMembers))
+	mux.HandleFunc("GET /admin/services/{id}/orgs/{org}/invites", s.requireAdmin(s.adminListOrgInvites))
+}
+
+func inviteJSON(inv store.OrgInvite) map[string]any {
+	return map[string]any{"org_id": inv.OrgID, "email": inv.Email, "role": inv.Role, "invited_by": inv.InvitedBy,
+		"created_at": inv.CreatedAt.UTC().Format(time.RFC3339), "expires_at": inv.ExpiresAt.UTC().Format(time.RFC3339)}
 }
 
 func orgJSON(o store.Org) map[string]any {
@@ -212,4 +223,72 @@ func (s *Server) adminListOrgMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeMembers(w, r, svc.ID, r.PathValue("org"))
+}
+
+// ── invites (auth-service-32) ──────────────────────────────────────────────
+
+func (s *Server) inviteOrgMember(w http.ResponseWriter, r *http.Request) {
+	svc, ok := s.callerService(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Email     string `json:"email"`
+		Role      string `json:"role"`
+		InvitedBy string `json:"invited_by"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	// One address cannot be mailed without bound, whatever the product does.
+	emailKey := "email:send:" + strings.ToLower(strings.TrimSpace(in.Email))
+	if !s.Limit.Allow(r.Context(), ratelimit.EmailSend, emailKey) {
+		tooMany(w, ratelimit.EmailSend)
+		return
+	}
+	inv, err := s.Users.Invite(r.Context(), svc, r.PathValue("id"), in.Email, in.Role, in.InvitedBy, clientIP(r))
+	if s.userFail(w, err) {
+		return
+	}
+	s.Limit.Fail(r.Context(), ratelimit.EmailSend, emailKey)
+	writeJSON(w, 201, inviteJSON(inv))
+}
+
+func (s *Server) writeInvites(w http.ResponseWriter, r *http.Request, serviceID, orgID string) {
+	list, err := s.Users.ListInvites(r.Context(), serviceID, orgID)
+	if s.userFail(w, err) {
+		return
+	}
+	out := make([]map[string]any, 0, len(list))
+	for _, inv := range list {
+		out = append(out, inviteJSON(inv))
+	}
+	writeJSON(w, 200, map[string]any{"invites": out})
+}
+
+func (s *Server) listOrgInvites(w http.ResponseWriter, r *http.Request) {
+	svc, ok := s.callerService(w, r)
+	if !ok {
+		return
+	}
+	s.writeInvites(w, r, svc.ID, r.PathValue("id"))
+}
+
+func (s *Server) revokeOrgInvite(w http.ResponseWriter, r *http.Request) {
+	svc, ok := s.callerService(w, r)
+	if !ok {
+		return
+	}
+	if s.userFail(w, s.Users.RevokeInvite(r.Context(), svc.ID, r.PathValue("id"), r.PathValue("email"), clientIP(r))) {
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (s *Server) adminListOrgInvites(w http.ResponseWriter, r *http.Request) {
+	svc, ok := s.adminService(w, r)
+	if !ok {
+		return
+	}
+	s.writeInvites(w, r, svc.ID, r.PathValue("org"))
 }

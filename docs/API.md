@@ -228,8 +228,22 @@ app decides who may make them (normally: callers whose token says `org_role: adm
 | PUT | `/v1/orgs/{id}/members/{user_id}` | `{"role":"admin\|member"}` adds or re-roles → `200 {"org_id","user_id","role","joined_at"}`. `409 last_admin` |
 | DELETE | `/v1/orgs/{id}/members/{user_id}` | `204`. `404 not_a_member`, `409 last_admin` |
 | GET | `/v1/users/{id}/orgs` | `{"orgs":[org + "role"]}`: what to show in an org picker |
+| POST | `/v1/orgs/{id}/invites` | `{"email","role":"admin\|member","invited_by"?}` → `201 invite`; mails the address. `409 already_member`, `409 org_disabled`, `404 email_disabled` (no outbox), `429` after 5 sends to one address in 15 min |
+| GET | `/v1/orgs/{id}/invites` | `{"invites":[invite]}` pending, oldest first |
+| DELETE | `/v1/orgs/{id}/invites/{email}` | `204`; `404 invite_not_found` |
 
 `org` = `{"id":"org_…","service_id","name","status","created_at"}`.
+`invite` = `{"org_id","email","role","invited_by","created_at","expires_at"}`.
+
+**Emailed invites.** An org admin (through the app) invites an address with a role. Squawk
+mails the person (naming the inviter when `invited_by` is a user id) and asks them to sign
+in to the app with that address. There is no link to click: the invite is claimed the moment
+a user with that **verified** address signs in, or verifies the address, and becomes a
+membership with the invited role (audited `org.invite.accepted`). Re-inviting the same
+address replaces the pending invite (new role, fresh 14-day expiry) and mails again. Someone
+who is already a member cannot be invited; their role is changed with the membership call.
+An invite does not open a closed pool: with `open_signup=false` the owner still provisions
+the account, and the invite waits for it.
 
 **Org context in tokens.** Add `org=<org id>` to `/oauth/authorize` and the sign-in completes
 only for a member (or the owner): the login finish calls answer `403 not_a_member` and leave
@@ -290,6 +304,7 @@ All under `/admin`. Auth: admin session cookie or admin bearer. **fresh** = step
 | GET | `/admin/services/{id}/users?limit=50&cursor=` | `{"users":[user],"next"}` |
 | GET | `/admin/services/{id}/orgs?limit=50&cursor=` | `{"orgs":[org],"next"}` (read-only view of the service's teams) |
 | GET | `/admin/services/{id}/orgs/{org}/members` | `{"members":[…]}` as the service-token call |
+| GET | `/admin/services/{id}/orgs/{org}/invites` | `{"invites":[invite]}` pending invites (read-only) |
 | PUT | `/admin/services/{id}/permissions` | `{"scopes":["read","write"],"roles":{"admin":["read","write"],"viewer":["read"]}}` → `200 service`. Scopes `^[a-z][a-z0-9:._-]{0,39}$` (≤50); role names `^[a-z][a-z0-9-]{0,39}$` (≤20) bundling catalog scopes only. Replaces the whole catalog |
 | POST | `/admin/services/{id}/credentials` | **fresh**. `201 {"credential":"nbk_…", "id","service_id","last4","created_at","revoked":false}` |
 | GET | `/admin/services/{id}/credentials` | `{"credentials":[{"id","service_id","last4","created_at","revoked","revoked_at"?}]}` (never the secret or its hash) |
@@ -312,7 +327,8 @@ All under `/admin`. Auth: admin session cookie or admin bearer. **fresh** = step
 Event kinds: `service.create`, `service.resource.add`, `service.permissions.set`, `service.login.set`,
 `user.create`, `user.provision`, `user.signup_denied`, `user.google.bind`, `user.email_code.sent`, `user.email.verified`, `user.passkey.register`, `user.login.alerted`, `user.login.alert_suppressed`, `user.update`, `user.login`, `user.login_denied`, `user.logout_everywhere`,
 `user.passkey.register`, `user.export`, `user.delete`, `org.create`, `org.update`, `org.delete`,
-`org.member.set`, `org.member.remove`, `credential.mint`, `credential.revoke`,
+`org.member.set`, `org.member.remove`, `org.invite.create`, `org.invite.revoke`,
+`org.invite.accepted`, `credential.mint`, `credential.revoke`,
 `token.issue`, `token.denied`, `passkey.register`, `owner.login`, `owner.login_denied`,
 `owner.stepup`, `owner.stepup_denied`, `owner.logout_everywhere`, `recovery.generate`,
 `recovery.login`, `recovery.denied`, `oauth.client.register`, `oauth.authorize.request`,

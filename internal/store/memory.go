@@ -31,6 +31,7 @@ type Memory struct {
 	seen      map[string]time.Time   // svc#user#ip → expires
 	orgs      map[string]Org         // svc#id
 	members   map[string]OrgMember   // svc#org#user
+	invites   map[string]OrgInvite   // svc#org#email
 	notBefore time.Time
 	Audit     []AuditEvent
 }
@@ -53,7 +54,7 @@ func NewMemory() *Memory {
 		fails: map[string]failCounter{}, resources: map[string]string{}, clients: map[string]OAuthClient{},
 		authz: map[string]AuthzRequest{}, codes: map[string]Code{}, refresh: map[string]RefreshToken{},
 		recovery: map[string]RecoveryCode{}, users: map[string]User{}, idents: map[string]string{}, upks: map[string]UserPasskey{}, seen: map[string]time.Time{},
-		orgs: map[string]Org{}, members: map[string]OrgMember{},
+		orgs: map[string]Org{}, members: map[string]OrgMember{}, invites: map[string]OrgInvite{},
 	}
 }
 
@@ -736,6 +737,11 @@ func (m *Memory) DeleteOrg(_ context.Context, serviceID, id string) error {
 			delete(m.members, k)
 		}
 	}
+	for k, inv := range m.invites {
+		if inv.ServiceID == serviceID && inv.OrgID == id {
+			delete(m.invites, k)
+		}
+	}
 	return nil
 }
 
@@ -803,5 +809,70 @@ func (m *Memory) DeleteOrgMember(_ context.Context, serviceID, orgID, userID str
 		return ErrNotFound
 	}
 	delete(m.members, k)
+	return nil
+}
+
+// ── org invites ────────────────────────────────────────────────────────────
+
+func (m *Memory) PutOrgInvite(_ context.Context, inv OrgInvite) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.invites[mkey(inv.ServiceID, inv.OrgID, inv.Email)] = inv
+	return nil
+}
+
+func (m *Memory) GetOrgInvite(_ context.Context, serviceID, orgID, email string) (OrgInvite, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	inv, ok := m.invites[mkey(serviceID, orgID, email)]
+	if !ok {
+		return OrgInvite{}, ErrNotFound
+	}
+	return inv, nil
+}
+
+func (m *Memory) ListOrgInvites(_ context.Context, serviceID, orgID string) ([]OrgInvite, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []OrgInvite{}
+	for _, inv := range m.invites {
+		if inv.ServiceID == serviceID && inv.OrgID == orgID {
+			out = append(out, inv)
+		}
+	}
+	sortInvites(out)
+	return out, nil
+}
+
+func (m *Memory) ListEmailInvites(_ context.Context, serviceID, email string) ([]OrgInvite, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := []OrgInvite{}
+	for _, inv := range m.invites {
+		if inv.ServiceID == serviceID && inv.Email == email {
+			out = append(out, inv)
+		}
+	}
+	sortInvites(out)
+	return out, nil
+}
+
+func sortInvites(out []OrgInvite) {
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].OrgID+out[i].Email < out[j].OrgID+out[j].Email
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+}
+
+func (m *Memory) DeleteOrgInvite(_ context.Context, serviceID, orgID, email string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := mkey(serviceID, orgID, email)
+	if _, ok := m.invites[k]; !ok {
+		return ErrNotFound
+	}
+	delete(m.invites, k)
 	return nil
 }

@@ -168,7 +168,8 @@ owner" and get a token with `sub=owner`. See docs/API.md "End users" and docs/DE
 "End users".
 
 **Teams.** Users of a pool can found organisations (a practice, a company) and add members
-with an org role, `admin` or `member`, through `/v1/orgs*`. An app asks for an org context
+with an org role, `admin` or `member`, through `/v1/orgs*`, or invite an address by email
+(the invite becomes a membership when that person signs in). An app asks for an org context
 with `org=` on the authorize request, or switches with `org=` on a refresh, and the tokens
 carry `org` + `org_role`; non-members cannot complete the sign-in. See docs/API.md "Teams and
 organisations".

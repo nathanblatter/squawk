@@ -3,7 +3,9 @@ package users
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/nathanblatter/squawk/internal/store"
 )
@@ -104,6 +106,121 @@ func TestOrgs(t *testing.T) {
 		kinds[e.Kind]++
 	}
 	for _, k := range []string{"org.create", "org.member.set", "org.member.remove", "org.update", "org.delete"} {
+		if kinds[k] == 0 {
+			t.Fatalf("missing audit %s: %v", k, kinds)
+		}
+	}
+}
+
+func TestOrgInvites(t *testing.T) {
+	u, mem, svc := newUsers(t)
+	ctx := context.Background()
+	alice, _ := u.Create(ctx, svc, "alice@x.test", "Alice")
+	org, _ := u.CreateOrg(ctx, svc, "Sunny Practice", alice.ID)
+
+	if _, err := u.Invite(ctx, svc, org.ID, "carol@x.test", OrgRoleMember, alice.ID, "ip"); !errors.Is(err, ErrEmailDisabled) {
+		t.Fatalf("no mailer: %v", err)
+	}
+	fm := &fakeMail{}
+	u.Mail = fm
+	if _, err := u.Invite(ctx, svc, org.ID, "carol@x.test", "boss", "", "ip"); !errors.Is(err, ErrInvalidOrgRole) {
+		t.Fatalf("bad role: %v", err)
+	}
+	if _, err := u.Invite(ctx, svc, "org_ghost", "carol@x.test", OrgRoleMember, "", "ip"); !errors.Is(err, ErrOrgNotFound) {
+		t.Fatalf("unknown org: %v", err)
+	}
+	if _, err := u.Invite(ctx, svc, org.ID, "not-an-email", OrgRoleMember, "", "ip"); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("bad address: %v", err)
+	}
+	if _, err := u.Invite(ctx, svc, org.ID, "carol@x.test", OrgRoleMember, "usr_ghost", "ip"); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("unknown inviter: %v", err)
+	}
+	if _, err := u.Invite(ctx, svc, org.ID, "Alice@x.test", OrgRoleMember, "", "ip"); !errors.Is(err, ErrAlreadyMember) {
+		t.Fatalf("inviting a member: %v", err)
+	}
+	if fm.sent != 0 {
+		t.Fatalf("nothing should have been mailed yet: %d", fm.sent)
+	}
+	inv, err := u.Invite(ctx, svc, org.ID, " Carol@X.test ", OrgRoleMember, alice.ID, "ip")
+	if err != nil || inv.Email != "carol@x.test" || inv.Role != OrgRoleMember || inv.InvitedBy != alice.ID || !inv.ExpiresAt.Equal(u.Now().Add(InviteTTL)) {
+		t.Fatalf("invite: %+v %v", inv, err)
+	}
+	if fm.sent != 1 || fm.to != "carol@x.test" || !strings.Contains(fm.text, "Alice (FinForge)") || !strings.Contains(fm.text, "Sunny Practice") || !strings.Contains(fm.text, "https://finforge.test") || !strings.Contains(fm.text, "a member") {
+		t.Fatalf("mail: sent=%d to=%q text=%q", fm.sent, fm.to, fm.text)
+	}
+	// Re-inviting replaces the role and mails again.
+	if inv, err := u.Invite(ctx, svc, org.ID, "carol@x.test", OrgRoleAdmin, "", "ip"); err != nil || inv.Role != OrgRoleAdmin || fm.sent != 2 || !strings.Contains(fm.text, "an admin") {
+		t.Fatalf("re-invite: %+v %v sent=%d", inv, err, fm.sent)
+	}
+	if list, err := u.ListInvites(ctx, svc.ID, org.ID); err != nil || len(list) != 1 || list[0].Role != OrgRoleAdmin {
+		t.Fatalf("list: %+v %v", list, err)
+	}
+	// A disabled org cannot invite.
+	off := "disabled"
+	_, _ = u.UpdateOrg(ctx, svc.ID, org.ID, nil, &off)
+	if _, err := u.Invite(ctx, svc, org.ID, "dave@x.test", OrgRoleMember, "", "ip"); !errors.Is(err, ErrOrgDisabled) {
+		t.Fatalf("disabled org: %v", err)
+	}
+	on := "active"
+	_, _ = u.UpdateOrg(ctx, svc.ID, org.ID, nil, &on)
+
+	// Carol signs in with an emailed code on the open pool: the account is
+	// created, the address is proven, the invite becomes a membership.
+	ch, _ := u.BeginLoginEmail(ctx, svc, "authz-1", "carol@x.test", "ip")
+	carol, _, err := u.FinishLoginEmail(ctx, svc, ch, fm.code(t), "ip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, err := mem.GetOrgMember(ctx, svc.ID, org.ID, carol.ID); err != nil || m.Role != OrgRoleAdmin {
+		t.Fatalf("claimed membership: %+v %v", m, err)
+	}
+	if list, _ := u.ListInvites(ctx, svc.ID, org.ID); len(list) != 0 {
+		t.Fatalf("invite must be consumed: %+v", list)
+	}
+	// An invite for someone who is already a member never changes their role.
+	_, _ = u.SetMember(ctx, svc.ID, org.ID, carol.ID, OrgRoleMember)
+	if _, err := u.Invite(ctx, svc, org.ID, "carol@x.test", OrgRoleAdmin, "", "ip"); !errors.Is(err, ErrAlreadyMember) {
+		t.Fatalf("member re-invite: %v", err)
+	}
+	// Expired invites are neither listed nor claimed.
+	if err := mem.PutOrgInvite(ctx, store.OrgInvite{ServiceID: svc.ID, OrgID: org.ID, Email: "late@x.test", Role: OrgRoleMember, CreatedAt: u.Now().Add(-20 * 24 * time.Hour), ExpiresAt: u.Now().Add(-6 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := u.ListInvites(ctx, svc.ID, org.ID); len(list) != 0 {
+		t.Fatalf("expired invite listed: %+v", list)
+	}
+	ch, _ = u.BeginLoginEmail(ctx, svc, "authz-2", "late@x.test", "ip")
+	late, _, _ := u.FinishLoginEmail(ctx, svc, ch, fm.code(t), "ip")
+	if _, err := mem.GetOrgMember(ctx, svc.ID, org.ID, late.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("expired invite must not be claimed: %v", err)
+	}
+	// Revoke: once, then not found.
+	_, _ = u.Invite(ctx, svc, org.ID, "erin@x.test", OrgRoleMember, "", "ip")
+	if err := u.RevokeInvite(ctx, svc.ID, org.ID, "Erin@x.test", "ip"); err != nil {
+		t.Fatal(err)
+	}
+	if err := u.RevokeInvite(ctx, svc.ID, org.ID, "erin@x.test", "ip"); !errors.Is(err, ErrInviteNotFound) {
+		t.Fatalf("revoke twice: %v", err)
+	}
+	// An unverified passkey account claims nothing until the address is
+	// verified; verification claims it.
+	_, _ = u.Invite(ctx, svc, org.ID, "frank@x.test", OrgRoleMember, "", "ip")
+	frank, _ := u.Create(ctx, svc, "frank@x.test", "Frank")
+	if frank.EmailVerified {
+		t.Fatal("app-created passkey account must start unverified")
+	}
+	vch, _ := u.BeginVerifyEmail(ctx, svc, frank.ID, "ip")
+	if _, err := u.FinishVerifyEmail(ctx, svc, frank.ID, vch, fm.code(t), "ip"); err != nil {
+		t.Fatal(err)
+	}
+	if m, err := mem.GetOrgMember(ctx, svc.ID, org.ID, frank.ID); err != nil || m.Role != OrgRoleMember {
+		t.Fatalf("claim on verification: %+v %v", m, err)
+	}
+	kinds := map[string]int{}
+	for _, e := range mem.Audit {
+		kinds[e.Kind]++
+	}
+	for _, k := range []string{"org.invite.create", "org.invite.revoke", "org.invite.accepted"} {
 		if kinds[k] == 0 {
 			t.Fatalf("missing audit %s: %v", k, kinds)
 		}

@@ -48,6 +48,8 @@ const (
 	skMember    = "MEMBER#"
 	gsiOrgs     = "ORGS#"
 	gsiUserOrgs = "USERORGS#"
+	skInvite    = "INVITE#"
+	gsiInvites  = "INVITES#"
 )
 
 // DynamoAPI is the slice of the DynamoDB client the store uses.
@@ -1592,6 +1594,15 @@ func (d *Dynamo) DeleteOrg(ctx context.Context, serviceID, id string) error {
 			return err
 		}
 	}
+	invs, err := d.ListOrgInvites(ctx, serviceID, id)
+	if err != nil {
+		return err
+	}
+	for _, inv := range invs {
+		if _, err := d.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &d.table, Key: dynKey(pkOrg+serviceID+"#"+id, skInvite+inv.Email)}); err != nil {
+			return err
+		}
+	}
 	_, err = d.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: &d.table, Key: dynKey(pkOrg+serviceID+"#"+id, skMeta)})
 	return err
 }
@@ -1683,6 +1694,126 @@ func (d *Dynamo) ListUserOrgs(ctx context.Context, serviceID, userID string) ([]
 func (d *Dynamo) DeleteOrgMember(ctx context.Context, serviceID, orgID, userID string) error {
 	_, err := d.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{
 		TableName: &d.table, Key: dynKey(pkOrg+serviceID+"#"+orgID, skMember+userID),
+		ConditionExpression: aws.String("attribute_exists(PK)"),
+	})
+	var cond *types.ConditionalCheckFailedException
+	if errors.As(err, &cond) {
+		return ErrNotFound
+	}
+	return err
+}
+
+// ── org invites (auth-service-32) ──────────────────────────────────────────
+//
+// ORG#<svc>#<org> / INVITE#<email>, GSI1 INVITES#<svc>#<email> / ORG#<org>:
+// one query lists an org's pending invites, one index query the invites
+// waiting for an address. The table TTL reaps expired rows.
+
+type inviteItem struct {
+	PK, SK, GSI1PK, GSI1SK string
+	Type                   string `dynamodbav:"type"`
+	ServiceID              string `dynamodbav:"service_id"`
+	OrgID                  string `dynamodbav:"org_id"`
+	Email                  string `dynamodbav:"email"`
+	Role                   string `dynamodbav:"role"`
+	InvitedBy              string `dynamodbav:"invited_by,omitempty"`
+	CreatedAt              string `dynamodbav:"created_at"`
+	ExpiresAt              string `dynamodbav:"expires_at"`
+	TTL                    int64  `dynamodbav:"ttl"`
+}
+
+func (it inviteItem) toInvite() (OrgInvite, error) {
+	c, err := time.Parse(time.RFC3339Nano, it.CreatedAt)
+	if err != nil {
+		return OrgInvite{}, fmt.Errorf("store: bad created_at on %s/%s: %w", it.PK, it.SK, err)
+	}
+	e, err := time.Parse(time.RFC3339Nano, it.ExpiresAt)
+	if err != nil {
+		return OrgInvite{}, fmt.Errorf("store: bad expires_at on %s/%s: %w", it.PK, it.SK, err)
+	}
+	return OrgInvite{ServiceID: it.ServiceID, OrgID: it.OrgID, Email: it.Email, Role: it.Role, InvitedBy: it.InvitedBy, CreatedAt: c, ExpiresAt: e}, nil
+}
+
+func (d *Dynamo) PutOrgInvite(ctx context.Context, inv OrgInvite) error {
+	item, err := attributevalue.MarshalMap(inviteItem{
+		PK: pkOrg + inv.ServiceID + "#" + inv.OrgID, SK: skInvite + inv.Email,
+		GSI1PK: gsiInvites + inv.ServiceID + "#" + inv.Email, GSI1SK: pkOrg + inv.OrgID,
+		Type: "org_invite", ServiceID: inv.ServiceID, OrgID: inv.OrgID, Email: inv.Email, Role: inv.Role, InvitedBy: inv.InvitedBy,
+		CreatedAt: inv.CreatedAt.UTC().Format(time.RFC3339Nano), ExpiresAt: inv.ExpiresAt.UTC().Format(time.RFC3339Nano), TTL: inv.ExpiresAt.Unix() + 60,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = d.db.PutItem(ctx, &dynamodb.PutItemInput{TableName: &d.table, Item: item})
+	return err
+}
+
+func (d *Dynamo) GetOrgInvite(ctx context.Context, serviceID, orgID, email string) (OrgInvite, error) {
+	out, err := d.db.GetItem(ctx, &dynamodb.GetItemInput{TableName: &d.table, Key: dynKey(pkOrg+serviceID+"#"+orgID, skInvite+email)})
+	if err != nil {
+		return OrgInvite{}, err
+	}
+	if out.Item == nil {
+		return OrgInvite{}, ErrNotFound
+	}
+	var it inviteItem
+	if err := attributevalue.UnmarshalMap(out.Item, &it); err != nil {
+		return OrgInvite{}, err
+	}
+	return it.toInvite()
+}
+
+// queryInvites drains every page of an invite query.
+func (d *Dynamo) queryInvites(ctx context.Context, in *dynamodb.QueryInput) ([]OrgInvite, error) {
+	out := []OrgInvite{}
+	for {
+		page, err := d.db.Query(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		var items []inviteItem
+		if err := attributevalue.UnmarshalListOfMaps(page.Items, &items); err != nil {
+			return nil, err
+		}
+		for _, it := range items {
+			inv, err := it.toInvite()
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, inv)
+		}
+		if page.LastEvaluatedKey == nil {
+			break
+		}
+		in.ExclusiveStartKey = page.LastEvaluatedKey
+	}
+	sortInvites(out)
+	return out, nil
+}
+
+func (d *Dynamo) ListOrgInvites(ctx context.Context, serviceID, orgID string) ([]OrgInvite, error) {
+	return d.queryInvites(ctx, &dynamodb.QueryInput{
+		TableName:              &d.table,
+		KeyConditionExpression: aws.String("PK = :pk AND begins_with(SK, :sk)"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":pk": &types.AttributeValueMemberS{Value: pkOrg + serviceID + "#" + orgID},
+			":sk": &types.AttributeValueMemberS{Value: skInvite},
+		},
+	})
+}
+
+func (d *Dynamo) ListEmailInvites(ctx context.Context, serviceID, email string) ([]OrgInvite, error) {
+	return d.queryInvites(ctx, &dynamodb.QueryInput{
+		TableName:                 &d.table,
+		IndexName:                 aws.String(gsi1),
+		KeyConditionExpression:    aws.String("GSI1PK = :p"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{":p": &types.AttributeValueMemberS{Value: gsiInvites + serviceID + "#" + email}},
+	})
+}
+
+func (d *Dynamo) DeleteOrgInvite(ctx context.Context, serviceID, orgID, email string) error {
+	_, err := d.db.DeleteItem(ctx, &dynamodb.DeleteItemInput{
+		TableName: &d.table, Key: dynKey(pkOrg+serviceID+"#"+orgID, skInvite+email),
 		ConditionExpression: aws.String("attribute_exists(PK)"),
 	})
 	var cond *types.ConditionalCheckFailedException

@@ -428,6 +428,50 @@ func conformance(t *testing.T, s Store) {
 	if ms, _ := s.ListUserOrgs(ctx, "svc_a", "u2"); len(ms) != 0 {
 		t.Fatalf("membership must die with the org: %+v", ms)
 	}
+
+	// Org invites: upsert by (org, email), listed per org and per address,
+	// gone with the org.
+	if err := s.CreateOrg(ctx, Org{ID: "org3", ServiceID: "svc_a", Name: "Three", Status: "active", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	inv := OrgInvite{ServiceID: "svc_a", OrgID: "org3", Email: "carol@x.test", Role: "member", InvitedBy: "u1", CreatedAt: now, ExpiresAt: now.Add(14 * 24 * time.Hour)}
+	if err := s.PutOrgInvite(ctx, inv); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutOrgInvite(ctx, OrgInvite{ServiceID: "svc_a", OrgID: "org1", Email: "carol@x.test", Role: "admin", CreatedAt: now.Add(time.Second), ExpiresAt: now.Add(14 * 24 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetOrgInvite(ctx, "svc_a", "org3", "carol@x.test"); err != nil || got.Role != "member" || got.InvitedBy != "u1" || !got.ExpiresAt.Equal(inv.ExpiresAt) {
+		t.Fatalf("GetOrgInvite: %+v %v", got, err)
+	}
+	if _, err := s.GetOrgInvite(ctx, "svc_a", "org3", "nobody@x.test"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing invite: %v", err)
+	}
+	inv.Role = "admin"
+	if err := s.PutOrgInvite(ctx, inv); err != nil {
+		t.Fatal(err)
+	}
+	if list, err := s.ListOrgInvites(ctx, "svc_a", "org3"); err != nil || len(list) != 1 || list[0].Role != "admin" {
+		t.Fatalf("ListOrgInvites after upsert: %+v %v", list, err)
+	}
+	if list, err := s.ListEmailInvites(ctx, "svc_a", "carol@x.test"); err != nil || len(list) != 2 || list[0].OrgID != "org3" || list[1].OrgID != "org1" {
+		t.Fatalf("ListEmailInvites: %+v %v", list, err)
+	}
+	if list, err := s.ListEmailInvites(ctx, "svc_b", "carol@x.test"); err != nil || len(list) != 0 {
+		t.Fatalf("ListEmailInvites across service: %+v %v", list, err)
+	}
+	if err := s.DeleteOrgInvite(ctx, "svc_a", "org1", "carol@x.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteOrgInvite(ctx, "svc_a", "org1", "carol@x.test"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing invite: %v", err)
+	}
+	if err := s.DeleteOrg(ctx, "svc_a", "org3"); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := s.ListEmailInvites(ctx, "svc_a", "carol@x.test"); len(list) != 0 {
+		t.Fatalf("invites must die with the org: %+v", list)
+	}
 	if _, err := s.GetOrg(ctx, "svc_a", "org2"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted org: %v", err)
 	}

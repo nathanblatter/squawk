@@ -629,7 +629,7 @@
         <div class="row user-add mt2${svc.login_url ? '' : ' hidden'}"><input class="grow user-email" placeholder="email"><input class="grow user-name" placeholder="name (optional)"><select class="user-method"><option value="passkey">passkey</option><option value="google">google</option><option value="email">email code</option></select><button class="small user-create">Add account</button></div>
       </details>
       <details class="orgs-details${svc.login_url ? '' : ' hidden'}"><summary>Teams</summary>
-        <p class="muted fine">Organisations the app's users created (a practice, a company). Members and their org role are managed by the app under its service token; this view is read-only.</p>
+        <p class="muted fine">Organisations the app's users created (a practice, a company). Members, their org role and emailed invites are managed by the app under its service token; this view is read-only.</p>
         <div class="orgs"></div>
       </details>
       <details><summary>${(svc.resources || []).length} connector resource${(svc.resources || []).length === 1 ? '' : 's'}</summary>
@@ -752,8 +752,12 @@
             const b = document.createElement('button'); b.className = 'small'; b.textContent = 'Show';
             b.onclick = async () => {
               try {
-                const { members } = await api('GET', `/admin/services/${svc.id}/orgs/${o.id}/members`);
-                tr.children[4].textContent = members.length ? members.map(m => `${m.email} (${m.role})`).join(', ') : 'none';
+                const [{ members }, { invites }] = await Promise.all([
+                  api('GET', `/admin/services/${svc.id}/orgs/${o.id}/members`),
+                  api('GET', `/admin/services/${svc.id}/orgs/${o.id}/invites`)]);
+                let text = members.length ? members.map(m => `${m.email} (${m.role})`).join(', ') : 'none';
+                if (invites.length) text += ' · invited: ' + invites.map(i => `${i.email} (${i.role})`).join(', ');
+                tr.children[4].textContent = text;
               } catch (e) { msg.textContent = e.message; msg.className = 'msg err'; }
             };
             tr.children[4].appendChild(b);

@@ -68,6 +68,12 @@ func (s *Server) userFail(w http.ResponseWriter, err error) bool {
 		writeJSON(w, 404, map[string]string{"error": "not_found"})
 	case errors.Is(err, users.ErrNotMember):
 		writeJSON(w, 404, map[string]string{"error": "not_a_member"})
+	case errors.Is(err, users.ErrInviteNotFound):
+		writeJSON(w, 404, map[string]string{"error": "invite_not_found"})
+	case errors.Is(err, users.ErrAlreadyMember):
+		writeJSON(w, 409, map[string]string{"error": "already_member"})
+	case errors.Is(err, users.ErrOrgDisabled):
+		writeJSON(w, 409, map[string]string{"error": "org_disabled"})
 	case errors.Is(err, users.ErrLastAdmin):
 		writeJSON(w, 409, map[string]string{"error": "last_admin", "detail": "an org must keep at least one admin; promote someone else first or delete the org"})
 	case errors.Is(err, users.ErrInvalidOrgName), errors.Is(err, users.ErrInvalidOrgRole):

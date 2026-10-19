@@ -3,7 +3,10 @@ package users
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/nathanblatter/squawk/internal/store"
 )
@@ -254,4 +257,164 @@ func (u *Users) memberships(ctx context.Context, serviceID, userID string) ([]Me
 		out = append(out, Membership{Org: org, Role: m.Role})
 	}
 	return out, nil
+}
+
+// ── invites (auth-service-32) ──────────────────────────────────────────────
+//
+// An org admin (through the product) invites an address with a role. Squawk
+// mails the person; the invite is claimed the moment a user with that
+// verified address signs in or verifies the address, and becomes a
+// membership. No secret link: signing in with the address is the proof.
+// An invite does not open a closed pool; on open_signup=false the owner still
+// provisions the account and the invite waits for it.
+
+// InviteTTL is how long an invite waits to be claimed.
+const InviteTTL = 14 * 24 * time.Hour
+
+var ErrAlreadyMember = errors.New("users: that address already belongs to a member")
+
+// Invite mails an invitation and records it. Re-inviting an address replaces
+// the pending invite (new role, fresh expiry) and mails again. invitedBy is
+// an optional user id named in the mail.
+func (u *Users) Invite(ctx context.Context, svc store.Service, orgID, email, role, invitedBy, ip string) (store.OrgInvite, error) {
+	if u.Mail == nil {
+		return store.OrgInvite{}, ErrEmailDisabled
+	}
+	if !validOrgRole(role) {
+		return store.OrgInvite{}, ErrInvalidOrgRole
+	}
+	org, err := u.GetOrg(ctx, svc.ID, orgID)
+	if err != nil {
+		return store.OrgInvite{}, err
+	}
+	if org.Status != "active" {
+		return store.OrgInvite{}, ErrOrgDisabled
+	}
+	email, err = normalizeEmail(email)
+	if err != nil {
+		return store.OrgInvite{}, err
+	}
+	inviter := ""
+	if invitedBy != "" {
+		by, err := u.Get(ctx, svc.ID, invitedBy)
+		if err != nil {
+			return store.OrgInvite{}, err
+		}
+		inviter = by.Name
+		if inviter == "" {
+			inviter = by.Email
+		}
+	}
+	members, err := u.Store.ListOrgMembers(ctx, svc.ID, orgID)
+	if err != nil {
+		return store.OrgInvite{}, err
+	}
+	for _, m := range members {
+		if user, err := u.Store.GetUser(ctx, svc.ID, m.UserID); err == nil && user.Email == email {
+			return store.OrgInvite{}, ErrAlreadyMember
+		}
+	}
+	now := u.Now()
+	inv := store.OrgInvite{ServiceID: svc.ID, OrgID: orgID, Email: email, Role: role, InvitedBy: invitedBy, CreatedAt: now, ExpiresAt: now.Add(InviteTTL)}
+	if err := u.Store.PutOrgInvite(ctx, inv); err != nil {
+		return store.OrgInvite{}, err
+	}
+	who := svc.Name
+	if inviter != "" {
+		who = inviter + " (" + svc.Name + ")"
+	}
+	where := svc.Name
+	if o, err := url.Parse(svc.LoginURL); err == nil && o.Host != "" {
+		where = o.Scheme + "://" + o.Host
+	}
+	text := fmt.Sprintf("%s has invited you to join %s on %s as %s.\n\nTo accept, sign in to %s with this email address (%s) within %d days. If you do not have an account yet, create one with this address.\n\nIf you were not expecting this, ignore this message; nothing happens until you sign in.",
+		who, org.Name, svc.Name, roleWord(role), where, email, int(InviteTTL.Hours()/24))
+	if err := u.Mail.Send(ctx, email, fmt.Sprintf("You're invited to %s on %s", org.Name, svc.Name), text); err != nil {
+		u.Log.Error("invite email failed", "service", svc.Slug, "org", orgID, "err", err)
+		return store.OrgInvite{}, err
+	}
+	u.audit(ctx, "org.invite.create", svc.ID, invitedBy, "org="+orgID+" email="+email+" role="+role, ip)
+	return inv, nil
+}
+
+func roleWord(role string) string {
+	if role == OrgRoleAdmin {
+		return "an admin"
+	}
+	return "a member"
+}
+
+// ListInvites returns an org's pending (unexpired) invites, oldest first.
+func (u *Users) ListInvites(ctx context.Context, serviceID, orgID string) ([]store.OrgInvite, error) {
+	if _, err := u.GetOrg(ctx, serviceID, orgID); err != nil {
+		return nil, err
+	}
+	list, err := u.Store.ListOrgInvites(ctx, serviceID, orgID)
+	if err != nil {
+		return nil, err
+	}
+	return u.liveInvites(list), nil
+}
+
+func (u *Users) liveInvites(list []store.OrgInvite) []store.OrgInvite {
+	now := u.Now()
+	out := make([]store.OrgInvite, 0, len(list))
+	for _, inv := range list {
+		if inv.ExpiresAt.After(now) {
+			out = append(out, inv)
+		}
+	}
+	return out
+}
+
+// RevokeInvite withdraws a pending invite.
+func (u *Users) RevokeInvite(ctx context.Context, serviceID, orgID, email, ip string) error {
+	if _, err := u.GetOrg(ctx, serviceID, orgID); err != nil {
+		return err
+	}
+	email, err := normalizeEmail(email)
+	if err != nil {
+		return err
+	}
+	if err := u.Store.DeleteOrgInvite(ctx, serviceID, orgID, email); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrInviteNotFound
+		}
+		return err
+	}
+	u.audit(ctx, "org.invite.revoke", serviceID, "", "org="+orgID+" email="+email, ip)
+	return nil
+}
+
+var ErrInviteNotFound = errors.New("users: no pending invite for that address")
+
+// claimInvites turns every pending invite for the user's verified address
+// into a membership. Called on each successful sign-in and when an address
+// gets verified; best effort, never fails the sign-in. A user who is already
+// a member keeps their current role (the invite is simply dropped); a
+// disabled or deleted org drops the invite too.
+func (u *Users) claimInvites(ctx context.Context, svc store.Service, user store.User, ip string) {
+	if !user.EmailVerified || user.Email == "" {
+		return
+	}
+	list, err := u.Store.ListEmailInvites(ctx, svc.ID, user.Email)
+	if err != nil {
+		u.Log.Error("invite lookup failed", "user", user.ID, "err", err)
+		return
+	}
+	for _, inv := range u.liveInvites(list) {
+		org, err := u.Store.GetOrg(ctx, svc.ID, inv.OrgID)
+		if err == nil && org.Status == "active" {
+			if _, err := u.Store.GetOrgMember(ctx, svc.ID, inv.OrgID, user.ID); errors.Is(err, store.ErrNotFound) {
+				if err := u.Store.PutOrgMember(ctx, store.OrgMember{ServiceID: svc.ID, OrgID: inv.OrgID, UserID: user.ID, Role: inv.Role, CreatedAt: u.Now()}); err != nil {
+					u.Log.Error("invite claim failed", "user", user.ID, "org", inv.OrgID, "err", err)
+					continue
+				}
+				u.audit(ctx, "org.invite.accepted", svc.ID, user.ID, "org="+inv.OrgID+" role="+inv.Role, ip)
+			}
+		}
+		if err := u.Store.DeleteOrgInvite(ctx, svc.ID, inv.OrgID, inv.Email); err != nil && !errors.Is(err, store.ErrNotFound) {
+			u.Log.Error("invite delete failed", "user", user.ID, "org", inv.OrgID, "err", err)
+		}
+	}
 }

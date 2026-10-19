@@ -77,6 +77,19 @@ type OrgMember struct {
 	CreatedAt time.Time
 }
 
+// OrgInvite is a pending, emailed invitation into an org (auth-service-32).
+// Keyed by (org, address): re-inviting the same address replaces the row.
+// Claimed (deleted) when a user with that verified address signs in.
+type OrgInvite struct {
+	ServiceID string
+	OrgID     string
+	Email     string // normalised (lower-case)
+	Role      string // admin | member
+	InvitedBy string // user id of the inviter, may be empty
+	CreatedAt time.Time
+	ExpiresAt time.Time
+}
+
 // UserPasskey is a WebAuthn credential of an end user (Data = webauthn.Credential JSON).
 type UserPasskey struct {
 	ServiceID string
@@ -225,12 +238,20 @@ type Store interface {
 	GetOrg(ctx context.Context, serviceID, id string) (Org, error)
 	ListOrgs(ctx context.Context, serviceID string, limit int, cursor string) (orgs []Org, next string, err error)
 	UpdateOrg(ctx context.Context, o Org) error                // ErrNotFound; replaces Name, Status
-	DeleteOrg(ctx context.Context, serviceID, id string) error // removes the org and its memberships; ErrNotFound
+	DeleteOrg(ctx context.Context, serviceID, id string) error // removes the org, its memberships and invites; ErrNotFound
 	PutOrgMember(ctx context.Context, m OrgMember) error
 	GetOrgMember(ctx context.Context, serviceID, orgID, userID string) (OrgMember, error)
 	ListOrgMembers(ctx context.Context, serviceID, orgID string) ([]OrgMember, error) // oldest first
 	ListUserOrgs(ctx context.Context, serviceID, userID string) ([]OrgMember, error)  // the user's memberships
 	DeleteOrgMember(ctx context.Context, serviceID, orgID, userID string) error       // ErrNotFound
+	// Org invites (auth-service-32). Stores may hand back expired rows
+	// (DynamoDB reaps them through the table TTL within ~48h); callers
+	// check ExpiresAt.
+	PutOrgInvite(ctx context.Context, inv OrgInvite) error // upsert by (org, email)
+	GetOrgInvite(ctx context.Context, serviceID, orgID, email string) (OrgInvite, error)
+	ListOrgInvites(ctx context.Context, serviceID, orgID string) ([]OrgInvite, error)   // oldest first
+	ListEmailInvites(ctx context.Context, serviceID, email string) ([]OrgInvite, error) // pending for one address
+	DeleteOrgInvite(ctx context.Context, serviceID, orgID, email string) error          // ErrNotFound
 	PutUserPasskey(ctx context.Context, p UserPasskey) error
 	UpdateUserPasskey(ctx context.Context, p UserPasskey) error
 	ListUserPasskeys(ctx context.Context, serviceID, userID string) ([]UserPasskey, error)

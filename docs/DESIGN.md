@@ -280,6 +280,7 @@ users get the service's `default_roles`. Refresh tokens carry `sub` and honour a
 | Seen address (new-login alerts) | `USER#<svc>#<id>` | `SEEN#<ip>` | | (TTL 90 days) |
 | Org | `ORG#<svc>#<id>` | `META` | `ORGS#<svc>` | `<created_at>#<id>` |
 | Org membership | `ORG#<svc>#<org>` | `MEMBER#<user id>` | `USERORGS#<svc>#<user id>` | `ORG#<org>` |
+| Org invite (ttl) | `ORG#<svc>#<org>` | `INVITE#<email>` | `INVITES#<svc>#<email>` | `ORG#<org>` |
 
 Service row gains `login_url`, `rp_id`, `origins`, `default_roles`.
 
@@ -335,8 +336,21 @@ Shape (*proposed* details):
   than failing: the app sees no `org` claim and shows its picker. Rejected: failing the refresh
   (would log the person out of the product for an org-side change) and listing every
   membership in the token (Nathan chose the explicit context).
-- Console: a read-only "Teams" view per user-pool service (orgs and members). Creating or
-  editing orgs from the console is not a flow Nathan asked for.
+- Console: a read-only "Teams" view per user-pool service (orgs, members, pending invites).
+  Creating or editing orgs from the console is not a flow Nathan asked for.
+
+**Emailed invites (auth-service-32, Nathan picked it 2026-10-19; shape proposed).** Row
+`ORG#<svc>#<org> / INVITE#<email>` with GSI1 `INVITES#<svc>#<email>` → `ORG#<org>`, so an
+org's pending invites and the invites waiting for one address are each one query; one
+pending invite per (org, address), 14-day expiry through the table TTL (readers also check
+`expires_at`, since TTL reaping lags). No secret link: the mail says "sign in to <app> with
+this address"; `claimInvites` runs on every successful sign-in and on address verification
+and turns each live invite for the user's **verified** address into a membership (existing
+members keep their role; a disabled or deleted org just drops the invite). Rejected: a
+token-in-link accept flow (every product would need an accept page, and signing in with the
+address already proves it) and letting an invite bypass `open_signup=false` (an org admin is
+a customer, not the owner; on a closed pool the invite waits for the owner to provision the
+account). Sends to one address are capped by the `EmailSend` limiter like sign-in codes.
 
 ## Tokens
 

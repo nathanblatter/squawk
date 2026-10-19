@@ -602,6 +602,7 @@ func (u *Users) finishGoogle(ctx context.Context, svc store.Service, user store.
 // first sign-in of an account is never alerted (it is the sign-up). Alerts
 // are best effort: nothing here can fail the sign-in.
 func (u *Users) noteLogin(ctx context.Context, svc store.Service, user store.User, how, ip string) {
+	u.claimInvites(ctx, svc, user, ip)
 	now := u.Now()
 	firstEver := user.LastLoginAt.IsZero()
 	user.LastLoginAt = now
@@ -834,6 +835,7 @@ func (u *Users) FinishVerifyEmail(ctx context.Context, svc store.Service, userID
 		return store.User{}, err
 	}
 	u.audit(ctx, "user.email.verified", svc.ID, user.ID, "", ip)
+	u.claimInvites(ctx, svc, user, ip)
 	return user, nil
 }
 

@@ -47,6 +47,15 @@ func TestPasswordAccounts(t *testing.T) {
 	if _, err := u.ProvisionPassword(ctx, svc, PasswordAccount{Username: "jdoe", Password: "correct horse"}); !errors.Is(err, ErrIdentityTaken) {
 		t.Fatalf("duplicate (case-insensitive): %v", err)
 	}
+	// The app may create password accounts on an open pool only.
+	if _, err := u.CreatePassword(ctx, svc, PasswordAccount{Username: "p1", Password: "correct horse"}); err != nil {
+		t.Fatalf("app create on open pool: %v", err)
+	}
+	_ = mem.UpdateServiceLogin(ctx, svc.ID, svc.LoginURL, svc.RPID, svc.Origins, svc.DefaultRoles, false)
+	closed, _ := mem.GetService(ctx, svc.ID)
+	if _, err := u.CreatePassword(ctx, closed, PasswordAccount{Username: "p2", Password: "correct horse"}); !errors.Is(err, ErrSignupClosed) {
+		t.Fatalf("app create on closed pool: %v", err)
+	}
 	// Squawk-hashed password, default roles, optional email.
 	ann, err := u.ProvisionPassword(ctx, svc, PasswordAccount{Username: "ann", Password: "correct horse", Email: "Ann@X.test"})
 	if err != nil || ann.Email != "ann@x.test" || len(ann.Roles) != 1 || ann.Roles[0] != "user" || bcrypt.CompareHashAndPassword([]byte(ann.PasswordHash), []byte("correct horse")) != nil {

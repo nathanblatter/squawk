@@ -131,11 +131,27 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	var in struct{ Email, Name string }
+	var in struct {
+		Email, Name  string
+		Method       string   `json:"method"`
+		Username     string   `json:"username"`
+		Password     string   `json:"password"`
+		PasswordHash string   `json:"password_hash"`
+		Roles        []string `json:"roles"`
+	}
 	if !readJSON(w, r, &in) {
 		return
 	}
-	u, err := s.Users.Create(r.Context(), svc, in.Email, in.Name)
+	var u store.User
+	var err error
+	switch in.Method {
+	case "", users.MethodPasskey:
+		u, err = s.Users.Create(r.Context(), svc, in.Email, in.Name)
+	case users.MethodPassword:
+		u, err = s.Users.CreatePassword(r.Context(), svc, users.PasswordAccount{Username: in.Username, Name: in.Name, Email: in.Email, Roles: in.Roles, Password: in.Password, PasswordHash: in.PasswordHash})
+	default:
+		err = users.ErrInvalidMethod
+	}
 	if s.userFail(w, err) {
 		return
 	}

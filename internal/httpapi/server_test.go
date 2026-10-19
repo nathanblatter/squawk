@@ -1489,6 +1489,19 @@ func TestPasswordHTTP(t *testing.T) {
 		t.Fatalf("duplicate username: %d %v", code, body)
 	}
 
+	// The app cannot create password accounts on this closed pool; it can
+	// once the pool opens, with an explicit role from the catalog.
+	if code, body := do(t, "POST", ts.URL+"/v1/users", svcTok, "application/json", `{"method":"password","username":"p0050","password":"correct horse"}`); code != 403 || body["error"] != "signup_closed" {
+		t.Fatalf("app create on closed pool: %d %v", code, body)
+	}
+	do(t, "PUT", ts.URL+"/admin/services/"+id+"/login", admin, "application/json", `{"login_url":"https://therapist.test/login","rp_id":"therapist.test","origins":["https://therapist.test"],"default_roles":["participant"],"open_signup":true}`)
+	if code, body := do(t, "POST", ts.URL+"/v1/users", svcTok, "application/json", `{"method":"password","username":"p0050","password":"correct horse","roles":["researcher"]}`); code != 201 || body["username"] != "p0050" || body["roles"].([]any)[0] != "researcher" {
+		t.Fatalf("app create on open pool: %d %v", code, body)
+	}
+	if code, body := do(t, "POST", ts.URL+"/v1/users", svcTok, "application/json", `{"method":"google","email":"g@x.test"}`); code != 400 {
+		t.Fatalf("app create with another method: %d %v", code, body)
+	}
+
 	// Login through the parked authorization.
 	_, reg := do(t, "POST", ts.URL+"/oauth/register", "", "application/json", `{"client_name":"Therapist web","redirect_uris":["https://therapist.test/cb"],"token_endpoint_auth_method":"none"}`)
 	clientID := reg["client_id"].(string)

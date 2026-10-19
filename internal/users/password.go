@@ -115,6 +115,25 @@ func (u *Users) resolveHash(password, hash string) (string, error) {
 // migration import calls, one user at a time). Works whatever open_signup
 // says, like Provision.
 func (u *Users) ProvisionPassword(ctx context.Context, svc store.Service, in PasswordAccount) (store.User, error) {
+	return u.newPasswordUser(ctx, svc, in, "user.provision")
+}
+
+// CreatePassword is the app's path: a product whose sign-up form takes a
+// username and password (study participants joining by invite link) creates
+// the account under its service token. Refused on a closed pool, like
+// Create. Roles are the service's defaults unless given.
+func (u *Users) CreatePassword(ctx context.Context, svc store.Service, in PasswordAccount) (store.User, error) {
+	if svc.LoginURL == "" {
+		return store.User{}, ErrNotUserPool
+	}
+	if !svc.OpenSignup {
+		u.audit(ctx, "user.signup_denied", svc.ID, "", "method=password username="+strings.TrimSpace(in.Username), "")
+		return store.User{}, ErrSignupClosed
+	}
+	return u.newPasswordUser(ctx, svc, in, "user.create")
+}
+
+func (u *Users) newPasswordUser(ctx context.Context, svc store.Service, in PasswordAccount, auditKind string) (store.User, error) {
 	if svc.LoginURL == "" {
 		return store.User{}, ErrNotUserPool
 	}
@@ -152,7 +171,7 @@ func (u *Users) ProvisionPassword(ctx context.Context, svc store.Service, in Pas
 		}
 		return store.User{}, err
 	}
-	u.audit(ctx, "user.provision", svc.ID, user.ID, "method=password username="+display, "")
+	u.audit(ctx, auditKind, svc.ID, user.ID, "method=password username="+display, "")
 	return user, nil
 }
 

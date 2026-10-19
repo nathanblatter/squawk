@@ -195,9 +195,11 @@ AI Therapist's 60-odd accounts have bcrypt hashes and pseudonymous usernames wit
 and Nathan chose to move them as they are rather than force a reset. Shape: identity
 `username:<lower-cased name>`, display `username` kept; `email` optional (vouched by the owner
 when given); born `email_verified` so the normal login gate applies; no codes or alerts
-without an address. Owner-only creation (`POST /admin/services/{id}/users`, method
-`password`, plaintext or an existing bcrypt hash), so a pool never grows password accounts on
-its own. Login: `POST /v1/login/password` on the parked authorization; unknown name and wrong
+without an address. Created by the owner (`POST /admin/services/{id}/users`, method
+`password`, plaintext or an existing bcrypt hash) or, on an **open** pool, by the app under
+its service token (`POST /v1/users`, method `password`: AI Therapist's participants join by
+invite link and choose a username), so a closed pool never grows password accounts on its
+own. Login: `POST /v1/login/password` on the parked authorization; unknown name and wrong
 password are the same `401`, timed alike (a dummy bcrypt compare for the unknown case); 10
 failures lock the username for 15 minutes from any IP, on top of the per-IP limit. Tokens
 carry `preferred_username`. **Conversion, one method for life over time:** a password account

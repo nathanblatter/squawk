@@ -160,9 +160,9 @@ address may own one account per method.
 **Password accounts** are keyed by `username` (case-insensitive, no spaces) and may have no
 email at all (pseudonymous study participants). They are born `email_verified` (the owner
 vouches), never receive codes or alerts, and their tokens carry `preferred_username` instead
-of, or as well as, `email`. The owner creates them one at a time with a plaintext password
-(hashed here, bcrypt cost 12) or an existing bcrypt `password_hash` copied from the old
-system. Registering a passkey **converts** the account: the method becomes `passkey` and the
+of, or as well as, `email`. The owner creates them with a plaintext password (hashed here,
+bcrypt cost 12) or an existing bcrypt `password_hash` copied from the old system; on an open
+pool the app may create them too (`POST /v1/users`, method `password`). Registering a passkey **converts** the account: the method becomes `passkey` and the
 hash is deleted. Setting a new password (`POST /v1/users/{id}/password`, or the admin call)
 converts it back and removes the passkeys. Ten wrong passwords lock the username for 15
 minutes, from any address.
@@ -195,7 +195,7 @@ refusals are audited as `user.signup_denied`.
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/v1/users` | `{"email","name"?}` → `201 user` (method `passkey`, roles = service `default_roles`). `409 identity_taken`, `403 signup_closed` |
+| POST | `/v1/users` | `{"email","name"?}` → `201 user` (method `passkey`, roles = service `default_roles`). `409 identity_taken`, `403 signup_closed`. With `{"method":"password","username","password","name"?,"email"?,"roles"?}` the app creates a password account (its own sign-up form, e.g. a study participant joining by invite link); same `signup_closed` rule, roles must exist on the service |
 | GET | `/v1/users?limit=50&cursor=` | `{"users":[user],"next"}` |
 | GET | `/v1/users/{id}` | `user` |
 | PATCH | `/v1/users/{id}` | any of `{"roles":[…],"status":"active|disabled","name"}`; roles must exist on the service |
